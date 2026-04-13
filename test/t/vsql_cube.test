@@ -184,6 +184,37 @@ DROP TABLE t_bare;
 CREATE TABLE t_bad (c `cube`(101) NOT NULL);
 
 --echo #
+--echo # Binary deserialization bounds
+--echo #
+
+# cube_from_buf clamps ndim to n_slots so a corrupt blob with an inflated ndim
+# header cannot cause callers to loop beyond ll[kAbsoluteMaxDims]. The corrupt-
+# blob path cannot be triggered via SQL (encode validates all writes), so these
+# tests verify correct behavior at the boundary: ndim == n_slots exactly.
+
+# cube(3) column with a full 3-dimensional value — all ndim-sensitive functions
+# must return correct results, not garbage from out-of-bounds memory.
+CREATE TABLE t_bounds (c `cube`(3) NOT NULL);
+INSERT INTO t_bounds VALUES ('(1, 2, 3),(4, 5, 6)');
+SELECT cube_dim(c) FROM t_bounds;
+SELECT cube_ll_coord(c, 1), cube_ll_coord(c, 2), cube_ll_coord(c, 3) FROM t_bounds;
+SELECT cube_ur_coord(c, 1), cube_ur_coord(c, 2), cube_ur_coord(c, 3) FROM t_bounds;
+SELECT cube_coord(c, 1), cube_coord(c, 4) FROM t_bounds;
+SELECT cube_is_point(c) FROM t_bounds;
+SELECT cube_to_string(cube_union(c, c)) FROM t_bounds;
+SELECT cube_to_string(cube_inter(c, c)) FROM t_bounds;
+SELECT cube_distance(c, c) FROM t_bounds;
+DROP TABLE t_bounds;
+
+# Aggregate over a full-width cube(3) column — cube_agg_accumulate loops on
+# ndim; with a corrupt ndim this would write past ll[100].
+CREATE TABLE t_agg_bounds (c `cube`(3) NOT NULL);
+INSERT INTO t_agg_bounds VALUES ('(1, 2, 3)');
+INSERT INTO t_agg_bounds VALUES ('(4, 5, 6)');
+SELECT cube_to_string(cube_agg(c)) FROM t_agg_bounds;
+DROP TABLE t_agg_bounds;
+
+--echo #
 --echo # Cleanup
 --echo #
 

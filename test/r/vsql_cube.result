@@ -229,6 +229,43 @@ DROP TABLE t_bare;
 CREATE TABLE t_bad (c `cube`(101) NOT NULL);
 ERROR 42000: cube: dimension must be 1..100, got 101 near '`cube`(101) NOT NULL)' at line 1
 #
+# Binary deserialization bounds
+#
+CREATE TABLE t_bounds (c `cube`(3) NOT NULL);
+INSERT INTO t_bounds VALUES ('(1, 2, 3),(4, 5, 6)');
+SELECT cube_dim(c) FROM t_bounds;
+cube_dim(c)
+3
+SELECT cube_ll_coord(c, 1), cube_ll_coord(c, 2), cube_ll_coord(c, 3) FROM t_bounds;
+cube_ll_coord(c, 1)	cube_ll_coord(c, 2)	cube_ll_coord(c, 3)
+1	2	3
+SELECT cube_ur_coord(c, 1), cube_ur_coord(c, 2), cube_ur_coord(c, 3) FROM t_bounds;
+cube_ur_coord(c, 1)	cube_ur_coord(c, 2)	cube_ur_coord(c, 3)
+4	5	6
+SELECT cube_coord(c, 1), cube_coord(c, 4) FROM t_bounds;
+cube_coord(c, 1)	cube_coord(c, 4)
+1	4
+SELECT cube_is_point(c) FROM t_bounds;
+cube_is_point(c)
+0
+SELECT cube_to_string(cube_union(c, c)) FROM t_bounds;
+cube_to_string(cube_union(c, c))
+(1, 2, 3),(4, 5, 6)
+SELECT cube_to_string(cube_inter(c, c)) FROM t_bounds;
+cube_to_string(cube_inter(c, c))
+(1, 2, 3),(4, 5, 6)
+SELECT cube_distance(c, c) FROM t_bounds;
+cube_distance(c, c)
+0
+DROP TABLE t_bounds;
+CREATE TABLE t_agg_bounds (c `cube`(3) NOT NULL);
+INSERT INTO t_agg_bounds VALUES ('(1, 2, 3)');
+INSERT INTO t_agg_bounds VALUES ('(4, 5, 6)');
+SELECT cube_to_string(cube_agg(c)) FROM t_agg_bounds;
+cube_to_string(cube_agg(c))
+(1, 2, 3),(4, 5, 6)
+DROP TABLE t_agg_bounds;
+#
 # Cleanup
 #
 UNINSTALL EXTENSION vsql_cube;

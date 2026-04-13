@@ -88,6 +88,11 @@ static inline int cube_n_slots(size_t bin_len) {
 // dims (derived from bin_len via cube_n_slots). Unused slots are zeroed.
 static void cube_from_buf(const unsigned char *buf, int n_slots, CubeData *c) {
   c->ndim = static_cast<uint16_t>(buf[0] | (buf[1] << 8));
+  // Clamp ndim to n_slots. A corrupt blob could encode a larger ndim than the
+  // buffer can hold; without this, callers looping on c->ndim would read/write
+  // beyond ll[kAbsoluteMaxDims] and ur[kAbsoluteMaxDims].
+  if (c->ndim > static_cast<uint16_t>(n_slots))
+    c->ndim = static_cast<uint16_t>(n_slots);
   c->flags = buf[2];
   memset(c->padding, 0, sizeof(c->padding));
   memcpy(c->ll, buf + 8, sizeof(double) * n_slots);
