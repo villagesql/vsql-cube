@@ -250,10 +250,6 @@ These limitations reflect current VEF capabilities or explicit design choices in
 
 VEF supports parameter-driven storage sizes via `resolve_params_fn()`: `cube(5)` columns use 88 bytes per row, `cube(32)` uses 520, `cube(100)` uses 1608. The maximum is 100 dimensions (matching PostgreSQL's cube extension). An explicit N is always required — bare `cube` without N is rejected by the server.
 
-What VEF doesn't support is truly per-row variable length — a single column where a 3-dim row occupies 56 bytes and a 30-dim row occupies 488 bytes. The storage size is fixed per column declaration, not per individual row.
-
-**VEF hook needed:** Per-row variable-length storage so that only `ndim × 2 × 8 + header` bytes are written to disk for each individual row.
-
 ### L2: No Infix Operator Syntax
 
 **Impact:** Queries use named functions instead of PostgreSQL's infix operators. The functionality is identical — only the syntax differs. Code ported from PostgreSQL needs mechanical substitution.
@@ -269,35 +265,21 @@ VEF does not provide a custom operator registration API. PostgreSQL's cube opera
 | `a <#> b` | `cube_taxicab_distance(a, b)` |
 | `a <=> b` | `cube_chebyshev_distance(a, b)` |
 
-**VEF hook needed:** Custom infix operator registration.
-
 ### L3: No Array Input Type Support
 
 **Impact:** Constructors accept CSV strings instead of arrays. The workaround is straightforward — `'1.0,2.0,3.0'` instead of `ARRAY[1.0,2.0,3.0]`. Code ported from PostgreSQL needs string-formatting substitution at the call site.
 
 VEF VDFs cannot accept array-typed parameters:
 
-| PostgreSQL | This extension |
+| PostgreSQL | vsql-cube |
 |------------|----------------|
 | `cube(ARRAY[1.0,2.0,3.0])` | `cube_point_nd('1.0,2.0,3.0')` |
 | `cube(ARRAY[1.0], ARRAY[3.0])` | `cube_box_nd('1.0', '3.0')` |
 | `cube_subset(c, ARRAY[2,1])` | `cube_subset(c, '2,1')` |
 
-**VEF hook needed:** Array input type support in VDF parameter lists.
-
 ### L4: No GiST Indexing
 
-**Impact:** Cube columns can't be indexed. Range queries and nearest-neighbor lookups (`ORDER BY cube_distance(...) LIMIT k`) require a full scan. For small tables or infrequent queries this is fine. For large tables with frequent spatial queries, this is the binding constraint.
-
-VEF does not expose an index registration API. PostgreSQL's cube GiST operator class supports nearest-neighbor queries and bounding-box index scans.
-
-**VEF hook needed:** GiST / custom index operator class registration.
-
-### L5: No In-Place Extension Upgrade
-
-**Impact:** Upgrading the extension requires dropping all cube columns and recreating them. There's no way to do it in-place. For tables that already have cube data, the upgrade path is: export the data, drop the columns, uninstall, reinstall, recreate the columns, reload the data.
-
-`ALTER EXTENSION ... UPGRADE` does not yet exist in VillageSQL. To upgrade: drop all cube columns, `UNINSTALL EXTENSION vsql_cube`, then `INSTALL EXTENSION vsql_cube` and recreate the columns. Support for `ALTER EXTENSION ... UPGRADE` is planned for a future VillageSQL release.
+**Impact:** Cube columns can't be indexed. Range queries and nearest-neighbor lookups (`ORDER BY cube_distance(...) LIMIT k`) require a full scan. For small tables or infrequent queries this is fine. For large tables with frequent spatial queries, this is a constraint.
 
 ## Troubleshooting
 
