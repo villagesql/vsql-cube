@@ -17,7 +17,7 @@ vsql_cube/
 │   └── FindVillageSQL.cmake
 ├── src/
 │   └── vsql_cube.cc
-└── mysql-test/
+└── test/
     ├── t/
     │   └── vsql_cube.test
     └── r/

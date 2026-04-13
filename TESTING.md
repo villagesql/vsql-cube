@@ -46,18 +46,18 @@ The extension must be installed (VEB in `veb_dir`) before running tests. MTR ins
 **Linux:**
 ```bash
 cd $HOME/build/villagesql/mysql-test
-perl mysql-test-run.pl --suite=/path/to/vsql_cube/mysql-test
+perl mysql-test-run.pl --suite=/path/to/vsql_cube/test
 ```
 
 **macOS:**
 ```bash
 cd ~/build/villagesql/mysql-test
-perl mysql-test-run.pl --suite=/path/to/vsql_cube/mysql-test
+perl mysql-test-run.pl --suite=/path/to/vsql_cube/test
 ```
 
 **With parallel execution:**
 ```bash
-perl mysql-test-run.pl --suite=/path/to/vsql_cube/mysql-test --parallel=auto
+perl mysql-test-run.pl --suite=/path/to/vsql_cube/test --parallel=auto
 ```
 
 ## Regenerating Result Files
@@ -66,10 +66,10 @@ If you modify test cases or the extension behavior changes, regenerate expected 
 
 ```bash
 cd $VillageSQL_BUILD_DIR/mysql-test
-perl mysql-test-run.pl --suite=/path/to/vsql_cube/mysql-test --record
+perl mysql-test-run.pl --suite=/path/to/vsql_cube/test --record
 ```
 
-This overwrites `mysql-test/r/*.result`. Review the diff before committing.
+This overwrites `test/r/*.result`. Review the diff before committing.
 
 ## Test Files
 

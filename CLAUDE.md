@@ -196,7 +196,7 @@ Use `VEF_RESULT_VALUE`, `VEF_RESULT_NULL`, `VEF_RESULT_ERROR` — not `IS_VALUE`
 
 ## Testing
 
-Tests are in `mysql-test/t/vsql_cube.test`. See TESTING.md for run commands.
+Tests are in `test/t/vsql_cube.test`. See TESTING.md for run commands.
 
 **Critical**: `cube` is a MySQL reserved word. DDL must backtick-quote the type name, and an
 explicit dimension parameter is always required — bare `` `cube` `` without N is rejected:
