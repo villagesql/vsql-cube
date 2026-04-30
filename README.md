@@ -104,11 +104,16 @@ Choose `n` to match your actual data. A `cube(3)` column uses 56 bytes per row i
 | `cube_add_dim` | `(c cube, lo REAL, hi REAL)` | cube with one more dimension appended |
 
 ```sql
-SELECT cube_to_string(cube_point(5.0));                              -- (5)
-SELECT cube_to_string(cube_box(1.0, 3.0));                           -- (1),(3)
-SELECT cube_to_string(cube_point_nd('1,2,3'));                        -- (1, 2, 3)
-SELECT cube_to_string(cube_box_nd('1,2,3', '4,5,6'));                -- (1, 2, 3),(4, 5, 6)
-SELECT cube_to_string(cube_add_dim(cube_point_nd('1,2'), 3.0, 4.0)); -- (1, 2, 3),(1, 2, 4)
+SELECT cube_point(5.0);                -- (5)
+SELECT cube_box(1.0, 3.0);            -- (1),(3)
+SELECT cube_point_nd('1,2,3');         -- (1, 2, 3)
+SELECT cube_box_nd('1,2,3', '4,5,6'); -- (1, 2, 3),(4, 5, 6)
+
+-- cube_add_dim extends a stored cube with a new dimension
+CREATE TABLE t (c `cube`(32) NOT NULL);
+INSERT INTO t VALUES ('(1,2)');
+SELECT cube_add_dim(c, 3.0, 4.0) FROM t;  -- (1, 2, 3),(1, 2, 4)
+DROP TABLE t;
 ```
 
 ### Accessors
@@ -122,10 +127,13 @@ SELECT cube_to_string(cube_add_dim(cube_point_nd('1,2'), 3.0, 4.0)); -- (1, 2, 3
 | `cube_coord` | `(c cube, n INT)` | Position n using ll-then-ur indexing; NULL if out of range |
 
 ```sql
-SELECT cube_dim(cube_point_nd('1,2,3'));                -- 3
-SELECT cube_ll_coord(cube_box_nd('1,2','3,4'), 2);     -- 2
-SELECT cube_ur_coord(cube_box_nd('1,2','3,4'), 2);     -- 4
-SELECT cube_is_point(cube_point(5.0));                  -- 1
+CREATE TABLE t (c `cube`(3) NOT NULL);
+INSERT INTO t VALUES ('(1,2,3),(3,4,5)');
+SELECT cube_dim(c) FROM t;                -- 3
+SELECT cube_ll_coord(c, 2) FROM t;        -- 2
+SELECT cube_ur_coord(c, 2) FROM t;        -- 4
+SELECT cube_is_point(c) FROM t;           -- 0 (it's a box)
+DROP TABLE t;
 ```
 
 All non-aggregate functions are deterministic and can be used in CHECK constraints:
@@ -149,8 +157,11 @@ These replace PostgreSQL's infix operators (`&&`, `@>`, `<@`).
 | `cube_contained_by(a, b)` | a is fully inside b |
 
 ```sql
-SELECT cube_overlaps(cube_box(0.0, 3.0), cube_box(2.0, 5.0));  -- 1
-SELECT cube_contains(cube_box(0.0, 10.0), cube_box(2.0, 5.0)); -- 1
+CREATE TABLE t (a `cube`(1) NOT NULL, b `cube`(1) NOT NULL);
+INSERT INTO t VALUES ('(0),(3)', '(2),(5)');
+SELECT cube_overlaps(a, b) FROM t;   -- 1 (boxes share the range [2,3])
+SELECT cube_contains(a, b) FROM t;   -- 0 (a=(0,3) does not contain b=(2,5))
+DROP TABLE t;
 ```
 
 ### Distance Functions
@@ -164,9 +175,12 @@ These replace PostgreSQL's distance operators (`<->`, `<#>`, `<=>`). For box inp
 | `cube_chebyshev_distance(a, b)` | Chebyshev (L-infinity) |
 
 ```sql
-SELECT cube_distance(cube_point_nd('0,0'), cube_point_nd('3,4'));         -- 5
-SELECT cube_taxicab_distance(cube_point_nd('0,0'), cube_point_nd('3,4')); -- 7
-SELECT cube_chebyshev_distance(cube_point_nd('0,0'), cube_point_nd('3,4')); -- 4
+CREATE TABLE t (a `cube`(2) NOT NULL, b `cube`(2) NOT NULL);
+INSERT INTO t VALUES ('(0,0)', '(3,4)');
+SELECT cube_distance(a, b) FROM t;           -- 5
+SELECT cube_taxicab_distance(a, b) FROM t;   -- 7
+SELECT cube_chebyshev_distance(a, b) FROM t; -- 4
+DROP TABLE t;
 ```
 
 ### String Conversion
@@ -177,8 +191,11 @@ SELECT cube_chebyshev_distance(cube_point_nd('0,0'), cube_point_nd('3,4')); -- 4
 | `cube_to_string` | `(c cube)` | Render a cube value as a string |
 
 ```sql
-SELECT cube_from_string('(1, 2),(3, 4)');    -- (1, 2),(3, 4)
-SELECT cube_to_string(cube_box(1.0, 5.0));   -- (1),(5)
+SELECT cube_from_string('(1, 2),(3, 4)');  -- (1, 2),(3, 4)
+CREATE TABLE t (c `cube`(2) NOT NULL);
+INSERT INTO t VALUES ('(1,2),(3,4)');
+SELECT cube_to_string(c) FROM t;           -- (1, 2),(3, 4)
+DROP TABLE t;
 ```
 
 ### Geometry Functions
@@ -191,10 +208,13 @@ SELECT cube_to_string(cube_box(1.0, 5.0));   -- (1),(5)
 | `cube_subset` | `(c cube, dims_csv STRING)` | Extract and optionally reorder dimensions |
 
 ```sql
-SELECT cube_to_string(cube_union(cube_box(1.0,3.0), cube_box(2.0,5.0)));   -- (1),(5)
-SELECT cube_to_string(cube_inter(cube_box(1.0,5.0), cube_box(2.0,4.0)));   -- (2),(4)
-SELECT cube_to_string(cube_enlarge(cube_box_nd('1,1','5,5'), 2.0, 1));     -- (-1, 1),(7, 5)
-SELECT cube_to_string(cube_subset(cube_box_nd('1,2,3','4,5,6'), '2,1'));   -- (2, 1),(5, 4)
+CREATE TABLE t (a `cube`(3) NOT NULL, b `cube`(3) NOT NULL);
+INSERT INTO t VALUES ('(1,1,1),(3,3,3)', '(2,2,2),(5,5,5)');
+SELECT cube_union(a, b) FROM t;          -- (1, 1, 1),(5, 5, 5)
+SELECT cube_inter(a, b) FROM t;          -- (2, 2, 2),(3, 3, 3)
+SELECT cube_enlarge(a, 1.0, 2) FROM t;  -- (0, 0, 1),(4, 4, 3)
+SELECT cube_subset(a, '3,1') FROM t;    -- (1, 1),(3, 3)
+DROP TABLE t;
 ```
 
 ### Aggregate Functions
@@ -290,6 +310,9 @@ VEF VDFs cannot accept array-typed parameters:
 **`cube` column DDL fails:**
 - `cube` is a MySQL reserved word. Always backtick-quote it and include an explicit dimension: `` `cube`(32) ``
 - Bare `` `cube` `` without a dimension parameter is not supported — the server requires an explicit N
+
+**"cannot determine type parameters for vsql_cube.cube" error:**
+- The server infers the cube's dimension parameter (`N` in `cube(N)`) from column metadata. When a cube value comes from a VDF constructor rather than a column, no metadata is available. Store the cube in a column and operate on it from there — this is the normal usage pattern. Example: `INSERT INTO t VALUES ('(1,2,3)'); SELECT cube_dim(c) FROM t;`
 
 **Building against a newer server fails:**
 - Ensure `VillageSQL_SOURCE_DIR` is set so cmake picks up Protocol 2 SDK headers

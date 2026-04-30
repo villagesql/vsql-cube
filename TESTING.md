@@ -98,8 +98,13 @@ After building and installing, verify the extension works:
 
 ```sql
 INSTALL EXTENSION vsql_cube;
-SELECT cube_to_string(cube_point(5.0));                              -- (5)
-SELECT cube_to_string(cube_box_nd('1,2,3', '4,5,6'));               -- (1, 2, 3),(4, 5, 6)
-SELECT cube_distance(cube_point_nd('0,0'), cube_point_nd('3,4'));   -- 5
+-- Constructors work standalone
+SELECT cube_point(5.0);                    -- (5)
+SELECT cube_box_nd('1,2,3', '4,5,6');     -- (1, 2, 3),(4, 5, 6)
+-- Functions taking cube arguments require column values
+CREATE TABLE t (a `cube`(2) NOT NULL, b `cube`(2) NOT NULL);
+INSERT INTO t VALUES ('(0,0)', '(3,4)');
+SELECT cube_dim(a), cube_distance(a, b) FROM t;  -- 2, 5
+DROP TABLE t;
 UNINSTALL EXTENSION vsql_cube;
 ```
