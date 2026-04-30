@@ -157,6 +157,13 @@ SELECT cube_agg(c) FROM t_cube WHERE 1 = 0;
 cube_agg(c)
 NULL
 DROP TABLE t_cube;
+CREATE TABLE t_cube_nm (c `cube`(3) NOT NULL);
+INSERT INTO t_cube_nm VALUES ('(10,20,30)');
+INSERT INTO t_cube_nm VALUES ('(15,18,35)');
+SELECT cube_agg(c) FROM t_cube_nm;
+cube_agg(c)
+(10, 18, 30),(15, 20, 35)
+DROP TABLE t_cube_nm;
 CREATE TABLE t_scalar (x DOUBLE NOT NULL);
 INSERT INTO t_scalar VALUES (1.0), (5.0), (3.0), (2.0);
 SELECT cube_scalar_agg(x) FROM t_scalar;

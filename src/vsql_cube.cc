@@ -1291,8 +1291,10 @@ void cube_agg_accumulate(CubeAggState &state, CustomArg arg) {
   CubeData &cur = *state;
   int nd = std::max(cur.ndim, incoming.ndim);
   for (int i = 0; i < nd; i++) {
-    cur.ll[i] = std::min(cube_ll(cur, i), cube_ll(incoming, i));
-    cur.ur[i] = std::max(cube_ur(cur, i), cube_ur(incoming, i));
+    double ll_i = cube_ll(cur, i);
+    double ur_i = cube_ur(cur, i);
+    cur.ll[i] = std::min(ll_i, cube_ll(incoming, i));
+    cur.ur[i] = std::max(ur_i, cube_ur(incoming, i));
   }
   cur.ndim = static_cast<uint16_t>(nd);
   cube_normalize(&cur);
