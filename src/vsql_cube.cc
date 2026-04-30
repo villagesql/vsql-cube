@@ -28,11 +28,12 @@
 //   Bytes 8+n*8 to 8+2n*8-1: double ur[n]  (upper-right corners)
 //   Total: 8 + 2*n*8 bytes
 
-#include <villagesql/extension.h>
+#include <villagesql/vsql.h>
 
 #include <algorithm>
 #include <cassert>
 #include <cerrno>
+#include <cinttypes>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -41,15 +42,13 @@
 #include <string>
 #include <string_view>
 
-using namespace villagesql::extension_builder;
-using namespace villagesql::func_builder;
-using namespace villagesql::type_builder;
+using namespace villagesql;
 
 // =============================================================================
 // Constants
 // =============================================================================
 
-constexpr const char *CUBE = "cube";
+static constexpr const char kCubeName[] = "cube";
 // Absolute maximum dimensions (matches PostgreSQL cube extension).
 constexpr int kAbsoluteMaxDims = 100;
 // Default when no parameter given: cube == cube(32).
@@ -396,20 +395,20 @@ bool cube_resolve_params(const std::map<std::string, std::string> &params,
 // Type Encode/Decode
 // =============================================================================
 
-static bool cube_encode(unsigned char *buf, size_t buf_size,
-                        const char *from, size_t from_len, size_t *length) {
+bool cube_encode(std::string_view from, Span<unsigned char> buf,
+                 size_t *length) {
   try {
-    int n_slots = cube_n_slots(buf_size);
+    int n_slots = cube_n_slots(buf.size());
     if (n_slots < 0) return true;
     // Empty/whitespace-only input is invalid (matches PostgreSQL cube behavior)
-    const char *p = from;
-    const char *end = from + from_len;
+    const char *p = from.data();
+    const char *end = from.data() + from.size();
     p = skip_ws(p, end);
     if (p == end) return true;
     CubeData c;
-    if (cube_parse(from, from_len, &c)) return true;
+    if (cube_parse(from.data(), from.size(), &c)) return true;
     if (c.ndim > n_slots) return true;  // too many dims for this column type
-    cube_to_buf(&c, buf, n_slots);
+    cube_to_buf(&c, buf.data(), n_slots);
     *length = static_cast<size_t>(8 + 2 * n_slots * sizeof(double));
     return false;
   } catch (...) {
@@ -417,27 +416,26 @@ static bool cube_encode(unsigned char *buf, size_t buf_size,
   }
 }
 
-static bool cube_decode(const unsigned char *buf, size_t buf_size,
-                        char *to, size_t to_size, size_t *to_length) {
+bool cube_decode(Span<const unsigned char> buf, Span<char> out,
+                 size_t *out_len) {
   try {
-    int n_slots = cube_n_slots(buf_size);
+    int n_slots = cube_n_slots(buf.size());
     if (n_slots < 0) return true;
     CubeData c;
-    cube_from_buf(buf, n_slots, &c);
-    size_t n = cube_format(c, to, to_size);
+    cube_from_buf(buf.data(), n_slots, &c);
+    size_t n = cube_format(c, out.data(), out.size());
     if (n == 0) return true;
-    *to_length = n;
+    *out_len = n;
     return false;
   } catch (...) {
     return true;
   }
 }
 
-static int cube_compare(const unsigned char *a, size_t a_len,
-                        const unsigned char *b, size_t b_len) {
+int cube_compare(Span<const unsigned char> a, Span<const unsigned char> b) {
   try {
-    int a_slots = cube_n_slots(a_len);
-    int b_slots = cube_n_slots(b_len);
+    int a_slots = cube_n_slots(a.size());
+    int b_slots = cube_n_slots(b.size());
     // Invalid/truncated buffer: establish a defined total order.
     // Invalid sorts before valid.
     if (a_slots < 0 || b_slots < 0) {
@@ -445,8 +443,8 @@ static int cube_compare(const unsigned char *a, size_t a_len,
       return (a_slots < 0) ? -1 : 1;
     }
     CubeData ca, cb;
-    cube_from_buf(a, a_slots, &ca);
-    cube_from_buf(b, b_slots, &cb);
+    cube_from_buf(a.data(), a_slots, &ca);
+    cube_from_buf(b.data(), b_slots, &cb);
     int max_d = std::max(ca.ndim, cb.ndim);
     for (int i = 0; i < max_d; i++) {
       double la = cube_ll(ca, i), lb = cube_ll(cb, i);
@@ -485,10 +483,10 @@ static int n_slots_from_result(const vef_vdf_result_t *result) {
   return kDefaultMaxDims;
 }
 
+// Used by aggregate result functions which receive vef_vdf_result_t* directly.
 static void set_cube_result(const CubeData &c, vef_vdf_result_t *result) {
   int n_slots;
   if (result->type_params.count > 0) {
-    // Column context: use the declared n and enforce the dimension limit.
     n_slots = n_slots_from_result(result);
     if (c.ndim > n_slots) {
       result->type = VEF_RESULT_ERROR;
@@ -498,8 +496,7 @@ static void set_cube_result(const CubeData &c, vef_vdf_result_t *result) {
       return;
     }
   } else {
-    // No column context (standalone SELECT, subquery, etc.): write exactly
-    // as many slots as the cube actually uses so the result is self-sizing.
+    // No column context: write exactly as many slots as the cube actually uses.
     n_slots = static_cast<int>(c.ndim);
     if (n_slots < 1) n_slots = 1;
   }
@@ -508,65 +505,87 @@ static void set_cube_result(const CubeData &c, vef_vdf_result_t *result) {
   result->type = VEF_RESULT_VALUE;
 }
 
+// Used by typed VDF functions returning CUBE.
+// out.params().n is the column's declared dimension (kDefaultMaxDims if no
+// column context, since CubeParams::parse defaults to kDefaultMaxDims).
+static void set_cube_result_typed(const CubeData &c,
+                                  CustomResultWith<CubeParams> &out) {
+  int n_slots = static_cast<int>(out.params().n);
+  if (c.ndim > n_slots) {
+    char msg[VEF_MAX_ERROR_LEN];
+    snprintf(msg, sizeof(msg),
+             "cube: value has %d dimensions but column allows %d",
+             static_cast<int>(c.ndim), n_slots);
+    out.error(msg);
+    return;
+  }
+  size_t buf_size = 8 + 2 * static_cast<size_t>(n_slots) * sizeof(double);
+  auto buf = out.buffer();
+  cube_to_buf(&c, buf.data(), n_slots);
+  out.set_length(buf_size);
+}
+
 // =============================================================================
 // String Conversion VDFs
 // =============================================================================
 
 // CUBE_FROM_STRING(s STRING) → cube
-// Explicit string-to-cube conversion. The from_string() shortcut hardcodes
-// buffer_size=0 (256-byte default), which is too small for kMaxStorageSize=1608.
-void cube_from_string_impl(vef_context_t *, vef_invalue_t *arg,
-                           vef_vdf_result_t *r) {
+// Self-sizing: parses the cube first to determine the number of dims, then
+// writes exactly that many slots. Does not enforce column type limits (the
+// type system handles assignment checking).
+void cube_from_string_impl(StringArg arg, CustomResult out) {
   try {
-    if (arg->is_null) { r->type = VEF_RESULT_NULL; return; }
-    // Column context → use declared n; no context → allow full range.
-    int n_slots = (r->type_params.count > 0)
-                      ? n_slots_from_result(r)
-                      : kAbsoluteMaxDims;
-    size_t buf_size = static_cast<size_t>(8 + 2 * n_slots * sizeof(double));
-    size_t length = 0;
-    if (cube_encode(r->bin_buf, buf_size, arg->str_value, arg->str_len,
-                    &length)) {
-      r->type = VEF_RESULT_ERROR;
-      snprintf(r->error_msg, VEF_MAX_ERROR_LEN,
-               "cube_from_string: invalid cube string");
+    if (arg.is_null()) { out.set_null(); return; }
+    auto sv = arg.value();
+    // Reject empty/whitespace-only input.
+    const char *p = sv.data();
+    const char *end = sv.data() + sv.size();
+    p = skip_ws(p, end);
+    if (p == end) {
+      out.error("cube_from_string: invalid cube string");
       return;
     }
-    r->actual_len = length;
-    r->type = VEF_RESULT_VALUE;
+    CubeData c;
+    if (cube_parse(sv.data(), sv.size(), &c)) {
+      out.error("cube_from_string: invalid cube string");
+      return;
+    }
+    int n_slots = static_cast<int>(c.ndim);
+    if (n_slots < 1) n_slots = 1;
+    size_t buf_size = 8 + 2 * static_cast<size_t>(n_slots) * sizeof(double);
+    auto buf = out.buffer();
+    if (buf.size() < buf_size) {
+      out.error("cube_from_string: output buffer too small");
+      return;
+    }
+    cube_to_buf(&c, buf.data(), n_slots);
+    out.set_length(buf_size);
   } catch (...) {
-    r->type = VEF_RESULT_ERROR;
-    snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_from_string: internal error");
+    out.error("cube_from_string: internal error");
   }
 }
 
 // CUBE_TO_STRING(c cube) → STRING
-// Explicit cube-to-string conversion. The to_string() shortcut hardcodes
-// buffer_size=0 (256-byte default), which is too small for kMaxDecodeLen=2048.
-void cube_to_string_impl(vef_context_t *, vef_invalue_t *arg,
-                         vef_vdf_result_t *r) {
+void cube_to_string_impl(CustomArg arg, StringResult out) {
   try {
-    if (arg->is_null) { r->type = VEF_RESULT_NULL; return; }
-    int n_slots = cube_n_slots(arg->bin_len);
+    if (arg.is_null()) { out.set_null(); return; }
+    auto span = arg.value();
+    int n_slots = cube_n_slots(span.size());
     if (n_slots < 0) {
-      r->type = VEF_RESULT_ERROR;
-      snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_to_string: invalid input");
+      out.error("cube_to_string: invalid input");
       return;
     }
     CubeData c;
-    cube_from_buf(arg->bin_value, n_slots, &c);
-    size_t n = cube_format(c, r->str_buf, r->max_str_len);
+    cube_from_buf(span.data(), n_slots, &c);
+    auto buf = out.buffer();
+    size_t n = cube_format(c, buf.data(), buf.size());
     if (n == 0) {
-      r->type = VEF_RESULT_ERROR;
-      snprintf(r->error_msg, VEF_MAX_ERROR_LEN,
-               "cube_to_string: output buffer too small");
+      out.error("cube_to_string: output buffer too small");
       return;
     }
-    r->actual_len = n;
-    r->type = VEF_RESULT_VALUE;
+    out.set_length(n);
   } catch (...) {
-    r->type = VEF_RESULT_ERROR;
-    snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_to_string: internal error");
+    out.error("cube_to_string: internal error");
   }
 }
 
@@ -575,45 +594,41 @@ void cube_to_string_impl(vef_context_t *, vef_invalue_t *arg,
 // =============================================================================
 
 // CUBE_POINT(x REAL) → cube
-void cube_point_impl(vef_context_t *, vef_invalue_t *x, vef_vdf_result_t *r) {
+void cube_point_impl(RealArg x, CustomResultWith<CubeParams> out) {
   try {
-    if (x->is_null) { r->type = VEF_RESULT_NULL; return; }
+    if (x.is_null()) { out.set_null(); return; }
     CubeData c;
     memset(&c, 0, sizeof(c));
     c.ndim = 1;
     c.flags = kFlagIsPoint;
-    c.ll[0] = c.ur[0] = x->real_value;
-    set_cube_result(c, r);
+    c.ll[0] = c.ur[0] = x.value();
+    set_cube_result_typed(c, out);
   } catch (...) {
-    r->type = VEF_RESULT_ERROR;
-    snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_point: internal error");
+    out.error("cube_point: internal error");
   }
 }
 
 // CUBE_BOX(lo REAL, hi REAL) → cube
-void cube_box_impl(vef_context_t *, vef_invalue_t *lo, vef_invalue_t *hi,
-                   vef_vdf_result_t *r) {
+void cube_box_impl(RealArg lo, RealArg hi, CustomResultWith<CubeParams> out) {
   try {
-    if (lo->is_null || hi->is_null) { r->type = VEF_RESULT_NULL; return; }
+    if (lo.is_null() || hi.is_null()) { out.set_null(); return; }
     CubeData c;
     memset(&c, 0, sizeof(c));
     c.ndim = 1;
-    c.ll[0] = lo->real_value;
-    c.ur[0] = hi->real_value;
+    c.ll[0] = lo.value();
+    c.ur[0] = hi.value();
     cube_normalize(&c);
-    set_cube_result(c, r);
+    set_cube_result_typed(c, out);
   } catch (...) {
-    r->type = VEF_RESULT_ERROR;
-    snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_box: internal error");
+    out.error("cube_box: internal error");
   }
 }
 
 // CUBE_POINT_ND(coords_csv STRING) → cube  (n-dim point from CSV)
-void cube_point_nd_impl(vef_context_t *, vef_invalue_t *arg,
-                        vef_vdf_result_t *r) {
+void cube_point_nd_impl(StringArg arg, CustomResultWith<CubeParams> out) {
   try {
-    if (arg->is_null) { r->type = VEF_RESULT_NULL; return; }
-    std::string_view sv(arg->str_value, arg->str_len);
+    if (arg.is_null()) { out.set_null(); return; }
+    std::string_view sv = arg.value();
     CubeData c;
     memset(&c, 0, sizeof(c));
     int n = 0;
@@ -633,15 +648,15 @@ void cube_point_nd_impl(vef_context_t *, vef_invalue_t *arg,
       }
       tok = tok.substr(s, e - s + 1);
       if (n >= kAbsoluteMaxDims) {
-        r->type = VEF_RESULT_ERROR;
-        snprintf(r->error_msg, VEF_MAX_ERROR_LEN,
+        char msg[VEF_MAX_ERROR_LEN];
+        snprintf(msg, sizeof(msg),
                  "cube_point_nd: exceeds maximum %d dimensions", kAbsoluteMaxDims);
+        out.error(msg);
         return;
       }
       char tmp[64];
       if (tok.size() >= sizeof(tmp)) {
-        r->type = VEF_RESULT_ERROR;
-        snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_point_nd: token too long");
+        out.error("cube_point_nd: token too long");
         return;
       }
       memcpy(tmp, tok.data(), tok.size());
@@ -649,15 +664,15 @@ void cube_point_nd_impl(vef_context_t *, vef_invalue_t *arg,
       char *endptr;
       double v = strtod(tmp, &endptr);
       if (endptr != tmp + tok.size()) {
-        r->type = VEF_RESULT_ERROR;
-        snprintf(r->error_msg, VEF_MAX_ERROR_LEN,
-                 "cube_point_nd: invalid number '%s'", tmp);
+        char msg[VEF_MAX_ERROR_LEN];
+        snprintf(msg, sizeof(msg), "cube_point_nd: invalid number '%s'", tmp);
+        out.error(msg);
         return;
       }
       if (!std::isfinite(v)) {
-        r->type = VEF_RESULT_ERROR;
-        snprintf(r->error_msg, VEF_MAX_ERROR_LEN,
-                 "cube_point_nd: non-finite value '%s'", tmp);
+        char msg[VEF_MAX_ERROR_LEN];
+        snprintf(msg, sizeof(msg), "cube_point_nd: non-finite value '%s'", tmp);
+        out.error(msg);
         return;
       }
       c.ll[n] = c.ur[n] = v;
@@ -666,26 +681,24 @@ void cube_point_nd_impl(vef_context_t *, vef_invalue_t *arg,
       pos = comma + 1;
     }
     if (n == 0) {
-      r->type = VEF_RESULT_ERROR;
-      snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_point_nd: no coordinates");
+      out.error("cube_point_nd: no coordinates");
       return;
     }
     c.ndim = static_cast<uint16_t>(n);
     c.flags = kFlagIsPoint;
-    set_cube_result(c, r);
+    set_cube_result_typed(c, out);
   } catch (...) {
-    r->type = VEF_RESULT_ERROR;
-    snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_point_nd: internal error");
+    out.error("cube_point_nd: internal error");
   }
 }
 
 // CUBE_BOX_ND(lo_csv STRING, hi_csv STRING) → cube
-void cube_box_nd_impl(vef_context_t *, vef_invalue_t *lo_arg,
-                      vef_invalue_t *hi_arg, vef_vdf_result_t *r) {
+void cube_box_nd_impl(StringArg lo_arg, StringArg hi_arg,
+                      CustomResultWith<CubeParams> out) {
   try {
-    if (lo_arg->is_null || hi_arg->is_null) { r->type = VEF_RESULT_NULL; return; }
+    if (lo_arg.is_null() || hi_arg.is_null()) { out.set_null(); return; }
 
-    auto parse_csv = [&](std::string_view sv, double *out, int *n_out) -> bool {
+    auto parse_csv = [&](std::string_view sv, double *o, int *n_out) -> bool {
       int n = 0;
       size_t pos = 0;
       while (pos <= sv.size()) {
@@ -710,7 +723,7 @@ void cube_box_nd_impl(vef_context_t *, vef_invalue_t *lo_arg,
         double v = strtod(tmp, &endptr);
         if (endptr != tmp + tok.size()) return false;
         if (!std::isfinite(v)) return false;  // reject NaN and Inf
-        out[n++] = v;
+        o[n++] = v;
         if (comma == std::string_view::npos) break;
         pos = comma + 1;
       }
@@ -721,62 +734,59 @@ void cube_box_nd_impl(vef_context_t *, vef_invalue_t *lo_arg,
     CubeData c;
     memset(&c, 0, sizeof(c));
     int n_lo = 0, n_hi = 0;
-    if (!parse_csv(std::string_view(lo_arg->str_value, lo_arg->str_len), c.ll, &n_lo)) {
-      r->type = VEF_RESULT_ERROR;
-      snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_box_nd: invalid lo coords");
+    if (!parse_csv(lo_arg.value(), c.ll, &n_lo)) {
+      out.error("cube_box_nd: invalid lo coords");
       return;
     }
-    if (!parse_csv(std::string_view(hi_arg->str_value, hi_arg->str_len), c.ur, &n_hi)) {
-      r->type = VEF_RESULT_ERROR;
-      snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_box_nd: invalid hi coords");
+    if (!parse_csv(hi_arg.value(), c.ur, &n_hi)) {
+      out.error("cube_box_nd: invalid hi coords");
       return;
     }
     if (n_lo != n_hi) {
-      r->type = VEF_RESULT_ERROR;
-      snprintf(r->error_msg, VEF_MAX_ERROR_LEN,
+      char msg[VEF_MAX_ERROR_LEN];
+      snprintf(msg, sizeof(msg),
                "cube_box_nd: lo has %d dims, hi has %d dims", n_lo, n_hi);
+      out.error(msg);
       return;
     }
     c.ndim = static_cast<uint16_t>(n_lo);
     cube_normalize(&c);
-    set_cube_result(c, r);
+    set_cube_result_typed(c, out);
   } catch (...) {
-    r->type = VEF_RESULT_ERROR;
-    snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_box_nd: internal error");
+    out.error("cube_box_nd: internal error");
   }
 }
 
 // CUBE_ADD_DIM(c cube, lo REAL, hi REAL) → cube
-void cube_add_dim_impl(vef_context_t *, vef_invalue_t *c_arg,
-                       vef_invalue_t *lo, vef_invalue_t *hi,
-                       vef_vdf_result_t *r) {
+void cube_add_dim_impl(CustomArg c_arg, RealArg lo, RealArg hi,
+                       CustomResultWith<CubeParams> out) {
   try {
-    if (c_arg->is_null || lo->is_null || hi->is_null) {
-      r->type = VEF_RESULT_NULL; return;
+    if (c_arg.is_null() || lo.is_null() || hi.is_null()) {
+      out.set_null(); return;
     }
-    int n_slots = cube_n_slots(c_arg->bin_len);
+    auto span = c_arg.value();
+    int n_slots = cube_n_slots(span.size());
     if (n_slots < 0) {
-      r->type = VEF_RESULT_ERROR;
-      snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_add_dim: invalid input");
+      out.error("cube_add_dim: invalid input");
       return;
     }
     CubeData c;
-    cube_from_buf(c_arg->bin_value, n_slots, &c);
+    cube_from_buf(span.data(), n_slots, &c);
     if (c.ndim >= kAbsoluteMaxDims) {
-      r->type = VEF_RESULT_ERROR;
-      snprintf(r->error_msg, VEF_MAX_ERROR_LEN,
+      char msg[VEF_MAX_ERROR_LEN];
+      snprintf(msg, sizeof(msg),
                "cube_add_dim: already at max %d dimensions", kAbsoluteMaxDims);
+      out.error(msg);
       return;
     }
     int i = c.ndim;
-    c.ll[i] = lo->real_value;
-    c.ur[i] = hi->real_value;
+    c.ll[i] = lo.value();
+    c.ur[i] = hi.value();
     c.ndim++;
     cube_normalize(&c);
-    set_cube_result(c, r);
+    set_cube_result_typed(c, out);
   } catch (...) {
-    r->type = VEF_RESULT_ERROR;
-    snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_add_dim: internal error");
+    out.error("cube_add_dim: internal error");
   }
 }
 
@@ -785,119 +795,104 @@ void cube_add_dim_impl(vef_context_t *, vef_invalue_t *c_arg,
 // =============================================================================
 
 // CUBE_DIM(c cube) → INT
-void cube_dim_impl(vef_context_t *, vef_invalue_t *c_arg,
-                   vef_vdf_result_t *r) {
+void cube_dim_impl(CustomArg c_arg, IntResult r) {
   try {
-    if (c_arg->is_null) { r->type = VEF_RESULT_NULL; return; }
-    int n_slots = cube_n_slots(c_arg->bin_len);
+    if (c_arg.is_null()) { r.set_null(); return; }
+    auto span = c_arg.value();
+    int n_slots = cube_n_slots(span.size());
     if (n_slots < 0) {
-      r->type = VEF_RESULT_ERROR;
-      snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_dim: invalid input");
+      r.error("cube_dim: invalid input");
       return;
     }
     CubeData c;
-    cube_from_buf(c_arg->bin_value, n_slots, &c);
-    r->int_value = c.ndim;
-    r->type = VEF_RESULT_VALUE;
+    cube_from_buf(span.data(), n_slots, &c);
+    r.set(c.ndim);
   } catch (...) {
-    r->type = VEF_RESULT_ERROR;
-    snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_dim: internal error");
+    r.error("cube_dim: internal error");
   }
 }
 
 // CUBE_LL_COORD(c cube, n INT) → REAL  (1-indexed)
-void cube_ll_coord_impl(vef_context_t *, vef_invalue_t *c_arg,
-                        vef_invalue_t *n_arg, vef_vdf_result_t *r) {
+void cube_ll_coord_impl(CustomArg c_arg, IntArg n_arg, RealResult r) {
   try {
-    if (c_arg->is_null || n_arg->is_null) { r->type = VEF_RESULT_NULL; return; }
-    int n_slots = cube_n_slots(c_arg->bin_len);
+    if (c_arg.is_null() || n_arg.is_null()) { r.set_null(); return; }
+    auto span = c_arg.value();
+    int n_slots = cube_n_slots(span.size());
     if (n_slots < 0) {
-      r->type = VEF_RESULT_ERROR;
-      snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_ll_coord: invalid input");
+      r.error("cube_ll_coord: invalid input");
       return;
     }
     CubeData c;
-    cube_from_buf(c_arg->bin_value, n_slots, &c);
-    long long n = n_arg->int_value;
-    if (n < 1 || n > c.ndim) { r->type = VEF_RESULT_NULL; return; }
-    r->real_value = c.ll[n - 1];
-    r->type = VEF_RESULT_VALUE;
+    cube_from_buf(span.data(), n_slots, &c);
+    long long n = n_arg.value();
+    if (n < 1 || n > c.ndim) { r.set_null(); return; }
+    r.set(c.ll[n - 1]);
   } catch (...) {
-    r->type = VEF_RESULT_ERROR;
-    snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_ll_coord: internal error");
+    r.error("cube_ll_coord: internal error");
   }
 }
 
 // CUBE_UR_COORD(c cube, n INT) → REAL  (1-indexed)
-void cube_ur_coord_impl(vef_context_t *, vef_invalue_t *c_arg,
-                        vef_invalue_t *n_arg, vef_vdf_result_t *r) {
+void cube_ur_coord_impl(CustomArg c_arg, IntArg n_arg, RealResult r) {
   try {
-    if (c_arg->is_null || n_arg->is_null) { r->type = VEF_RESULT_NULL; return; }
-    int n_slots = cube_n_slots(c_arg->bin_len);
+    if (c_arg.is_null() || n_arg.is_null()) { r.set_null(); return; }
+    auto span = c_arg.value();
+    int n_slots = cube_n_slots(span.size());
     if (n_slots < 0) {
-      r->type = VEF_RESULT_ERROR;
-      snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_ur_coord: invalid input");
+      r.error("cube_ur_coord: invalid input");
       return;
     }
     CubeData c;
-    cube_from_buf(c_arg->bin_value, n_slots, &c);
-    long long n = n_arg->int_value;
-    if (n < 1 || n > c.ndim) { r->type = VEF_RESULT_NULL; return; }
-    r->real_value = (c.flags & kFlagIsPoint) ? c.ll[n - 1] : c.ur[n - 1];
-    r->type = VEF_RESULT_VALUE;
+    cube_from_buf(span.data(), n_slots, &c);
+    long long n = n_arg.value();
+    if (n < 1 || n > c.ndim) { r.set_null(); return; }
+    r.set((c.flags & kFlagIsPoint) ? c.ll[n - 1] : c.ur[n - 1]);
   } catch (...) {
-    r->type = VEF_RESULT_ERROR;
-    snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_ur_coord: internal error");
+    r.error("cube_ur_coord: internal error");
   }
 }
 
 // CUBE_IS_POINT(c cube) → INT  (1 = point, 0 = box)
-void cube_is_point_impl(vef_context_t *, vef_invalue_t *c_arg,
-                        vef_vdf_result_t *r) {
+void cube_is_point_impl(CustomArg c_arg, IntResult r) {
   try {
-    if (c_arg->is_null) { r->type = VEF_RESULT_NULL; return; }
-    int n_slots = cube_n_slots(c_arg->bin_len);
+    if (c_arg.is_null()) { r.set_null(); return; }
+    auto span = c_arg.value();
+    int n_slots = cube_n_slots(span.size());
     if (n_slots < 0) {
-      r->type = VEF_RESULT_ERROR;
-      snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_is_point: invalid input");
+      r.error("cube_is_point: invalid input");
       return;
     }
     CubeData c;
-    cube_from_buf(c_arg->bin_value, n_slots, &c);
-    r->int_value = (c.flags & kFlagIsPoint) ? 1 : 0;
-    r->type = VEF_RESULT_VALUE;
+    cube_from_buf(span.data(), n_slots, &c);
+    r.set((c.flags & kFlagIsPoint) ? 1 : 0);
   } catch (...) {
-    r->type = VEF_RESULT_ERROR;
-    snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_is_point: internal error");
+    r.error("cube_is_point: internal error");
   }
 }
 
 // CUBE_COORD(c cube, n INT) → REAL
 // n = 1..ndim → lower-left; n = ndim+1..2*ndim → upper-right  (like -> operator)
-void cube_coord_impl(vef_context_t *, vef_invalue_t *c_arg,
-                     vef_invalue_t *n_arg, vef_vdf_result_t *r) {
+void cube_coord_impl(CustomArg c_arg, IntArg n_arg, RealResult r) {
   try {
-    if (c_arg->is_null || n_arg->is_null) { r->type = VEF_RESULT_NULL; return; }
-    int n_slots = cube_n_slots(c_arg->bin_len);
+    if (c_arg.is_null() || n_arg.is_null()) { r.set_null(); return; }
+    auto span = c_arg.value();
+    int n_slots = cube_n_slots(span.size());
     if (n_slots < 0) {
-      r->type = VEF_RESULT_ERROR;
-      snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_coord: invalid input");
+      r.error("cube_coord: invalid input");
       return;
     }
     CubeData c;
-    cube_from_buf(c_arg->bin_value, n_slots, &c);
-    long long n = n_arg->int_value;
-    if (n < 1 || n > 2 * c.ndim) { r->type = VEF_RESULT_NULL; return; }
+    cube_from_buf(span.data(), n_slots, &c);
+    long long n = n_arg.value();
+    if (n < 1 || n > 2 * c.ndim) { r.set_null(); return; }
     if (n <= c.ndim) {
-      r->real_value = c.ll[n - 1];
+      r.set(c.ll[n - 1]);
     } else {
-      r->real_value = (c.flags & kFlagIsPoint) ? c.ll[n - c.ndim - 1]
-                                                : c.ur[n - c.ndim - 1];
+      r.set((c.flags & kFlagIsPoint) ? c.ll[n - c.ndim - 1]
+                                     : c.ur[n - c.ndim - 1]);
     }
-    r->type = VEF_RESULT_VALUE;
   } catch (...) {
-    r->type = VEF_RESULT_ERROR;
-    snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_coord: internal error");
+    r.error("cube_coord: internal error");
   }
 }
 
@@ -911,87 +906,78 @@ static int max_dim(const CubeData &a, const CubeData &b) {
 }
 
 // CUBE_OVERLAPS(a cube, b cube) → INT  (1=overlap, 0=no overlap)
-void cube_overlaps_impl(vef_context_t *, vef_invalue_t *a_arg,
-                        vef_invalue_t *b_arg, vef_vdf_result_t *r) {
+void cube_overlaps_impl(CustomArg a_arg, CustomArg b_arg, IntResult r) {
   try {
-    if (a_arg->is_null || b_arg->is_null) { r->type = VEF_RESULT_NULL; return; }
-    int a_slots = cube_n_slots(a_arg->bin_len), b_slots = cube_n_slots(b_arg->bin_len);
+    if (a_arg.is_null() || b_arg.is_null()) { r.set_null(); return; }
+    auto as = a_arg.value(), bs = b_arg.value();
+    int a_slots = cube_n_slots(as.size()), b_slots = cube_n_slots(bs.size());
     if (a_slots < 0 || b_slots < 0) {
-      r->type = VEF_RESULT_ERROR;
-      snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_overlaps: invalid input");
+      r.error("cube_overlaps: invalid input");
       return;
     }
     CubeData a, b;
-    cube_from_buf(a_arg->bin_value, a_slots, &a);
-    cube_from_buf(b_arg->bin_value, b_slots, &b);
+    cube_from_buf(as.data(), a_slots, &a);
+    cube_from_buf(bs.data(), b_slots, &b);
     int nd = max_dim(a, b);
     for (int i = 0; i < nd; i++) {
       double all = cube_ll(a, i), aur = cube_ur(a, i);
       double bll = cube_ll(b, i), bur = cube_ur(b, i);
-      if (all > bur || bll > aur) { r->int_value = 0; r->type = VEF_RESULT_VALUE; return; }
+      if (all > bur || bll > aur) { r.set(0); return; }
     }
-    r->int_value = 1;
-    r->type = VEF_RESULT_VALUE;
+    r.set(1);
   } catch (...) {
-    r->type = VEF_RESULT_ERROR;
-    snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_overlaps: internal error");
+    r.error("cube_overlaps: internal error");
   }
 }
 
 // CUBE_CONTAINS(a cube, b cube) → INT  (1 if a contains b)
-void cube_contains_impl(vef_context_t *, vef_invalue_t *a_arg,
-                        vef_invalue_t *b_arg, vef_vdf_result_t *r) {
+void cube_contains_impl(CustomArg a_arg, CustomArg b_arg, IntResult r) {
   try {
-    if (a_arg->is_null || b_arg->is_null) { r->type = VEF_RESULT_NULL; return; }
-    int a_slots = cube_n_slots(a_arg->bin_len), b_slots = cube_n_slots(b_arg->bin_len);
+    if (a_arg.is_null() || b_arg.is_null()) { r.set_null(); return; }
+    auto as = a_arg.value(), bs = b_arg.value();
+    int a_slots = cube_n_slots(as.size()), b_slots = cube_n_slots(bs.size());
     if (a_slots < 0 || b_slots < 0) {
-      r->type = VEF_RESULT_ERROR;
-      snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_contains: invalid input");
+      r.error("cube_contains: invalid input");
       return;
     }
     CubeData a, b;
-    cube_from_buf(a_arg->bin_value, a_slots, &a);
-    cube_from_buf(b_arg->bin_value, b_slots, &b);
+    cube_from_buf(as.data(), a_slots, &a);
+    cube_from_buf(bs.data(), b_slots, &b);
     int nd = max_dim(a, b);
     for (int i = 0; i < nd; i++) {
       if (cube_ll(a, i) > cube_ll(b, i) || cube_ur(a, i) < cube_ur(b, i)) {
-        r->int_value = 0; r->type = VEF_RESULT_VALUE; return;
+        r.set(0); return;
       }
     }
-    r->int_value = 1;
-    r->type = VEF_RESULT_VALUE;
+    r.set(1);
   } catch (...) {
-    r->type = VEF_RESULT_ERROR;
-    snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_contains: internal error");
+    r.error("cube_contains: internal error");
   }
 }
 
 // CUBE_CONTAINED_BY(a cube, b cube) → INT  (1 if a is inside b)
-void cube_contained_by_impl(vef_context_t *, vef_invalue_t *a_arg,
-                            vef_invalue_t *b_arg, vef_vdf_result_t *r) {
+void cube_contained_by_impl(CustomArg a_arg, CustomArg b_arg, IntResult r) {
   try {
-    if (a_arg->is_null || b_arg->is_null) { r->type = VEF_RESULT_NULL; return; }
-    int a_slots = cube_n_slots(a_arg->bin_len), b_slots = cube_n_slots(b_arg->bin_len);
+    if (a_arg.is_null() || b_arg.is_null()) { r.set_null(); return; }
+    auto as = a_arg.value(), bs = b_arg.value();
+    int a_slots = cube_n_slots(as.size()), b_slots = cube_n_slots(bs.size());
     if (a_slots < 0 || b_slots < 0) {
-      r->type = VEF_RESULT_ERROR;
-      snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_contained_by: invalid input");
+      r.error("cube_contained_by: invalid input");
       return;
     }
     // contained_by(a, b) ≡ contains(b, a)
     CubeData a, b;
-    cube_from_buf(a_arg->bin_value, a_slots, &a);
-    cube_from_buf(b_arg->bin_value, b_slots, &b);
+    cube_from_buf(as.data(), a_slots, &a);
+    cube_from_buf(bs.data(), b_slots, &b);
     int nd = max_dim(a, b);
     for (int i = 0; i < nd; i++) {
       if (cube_ll(b, i) > cube_ll(a, i) || cube_ur(b, i) < cube_ur(a, i)) {
-        r->int_value = 0; r->type = VEF_RESULT_VALUE; return;
+        r.set(0); return;
       }
     }
-    r->int_value = 1;
-    r->type = VEF_RESULT_VALUE;
+    r.set(1);
   } catch (...) {
-    r->type = VEF_RESULT_ERROR;
-    snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_contained_by: internal error");
+    r.error("cube_contained_by: internal error");
   }
 }
 
@@ -1008,19 +994,18 @@ static inline double interval_gap(double a_lo, double a_hi,
 }
 
 // CUBE_DISTANCE(a, b) → REAL  (Euclidean / L2)
-void cube_distance_impl(vef_context_t *, vef_invalue_t *a_arg,
-                        vef_invalue_t *b_arg, vef_vdf_result_t *r) {
+void cube_distance_impl(CustomArg a_arg, CustomArg b_arg, RealResult r) {
   try {
-    if (a_arg->is_null || b_arg->is_null) { r->type = VEF_RESULT_NULL; return; }
-    int a_slots = cube_n_slots(a_arg->bin_len), b_slots = cube_n_slots(b_arg->bin_len);
+    if (a_arg.is_null() || b_arg.is_null()) { r.set_null(); return; }
+    auto as = a_arg.value(), bs = b_arg.value();
+    int a_slots = cube_n_slots(as.size()), b_slots = cube_n_slots(bs.size());
     if (a_slots < 0 || b_slots < 0) {
-      r->type = VEF_RESULT_ERROR;
-      snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_distance: invalid input");
+      r.error("cube_distance: invalid input");
       return;
     }
     CubeData a, b;
-    cube_from_buf(a_arg->bin_value, a_slots, &a);
-    cube_from_buf(b_arg->bin_value, b_slots, &b);
+    cube_from_buf(as.data(), a_slots, &a);
+    cube_from_buf(bs.data(), b_slots, &b);
     int nd = max_dim(a, b);
     double sum = 0.0;
     for (int i = 0; i < nd; i++) {
@@ -1028,59 +1013,51 @@ void cube_distance_impl(vef_context_t *, vef_invalue_t *a_arg,
                               cube_ll(b, i), cube_ur(b, i));
       sum += g * g;
     }
-    r->real_value = sqrt(sum);
-    r->type = VEF_RESULT_VALUE;
+    r.set(sqrt(sum));
   } catch (...) {
-    r->type = VEF_RESULT_ERROR;
-    snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_distance: internal error");
+    r.error("cube_distance: internal error");
   }
 }
 
 // CUBE_TAXICAB_DISTANCE(a, b) → REAL  (L1 / Manhattan)
-void cube_taxicab_distance_impl(vef_context_t *, vef_invalue_t *a_arg,
-                                vef_invalue_t *b_arg, vef_vdf_result_t *r) {
+void cube_taxicab_distance_impl(CustomArg a_arg, CustomArg b_arg, RealResult r) {
   try {
-    if (a_arg->is_null || b_arg->is_null) { r->type = VEF_RESULT_NULL; return; }
-    int a_slots = cube_n_slots(a_arg->bin_len), b_slots = cube_n_slots(b_arg->bin_len);
+    if (a_arg.is_null() || b_arg.is_null()) { r.set_null(); return; }
+    auto as = a_arg.value(), bs = b_arg.value();
+    int a_slots = cube_n_slots(as.size()), b_slots = cube_n_slots(bs.size());
     if (a_slots < 0 || b_slots < 0) {
-      r->type = VEF_RESULT_ERROR;
-      snprintf(r->error_msg, VEF_MAX_ERROR_LEN,
-               "cube_taxicab_distance: invalid input");
+      r.error("cube_taxicab_distance: invalid input");
       return;
     }
     CubeData a, b;
-    cube_from_buf(a_arg->bin_value, a_slots, &a);
-    cube_from_buf(b_arg->bin_value, b_slots, &b);
+    cube_from_buf(as.data(), a_slots, &a);
+    cube_from_buf(bs.data(), b_slots, &b);
     int nd = max_dim(a, b);
     double sum = 0.0;
     for (int i = 0; i < nd; i++) {
       sum += interval_gap(cube_ll(a, i), cube_ur(a, i),
                           cube_ll(b, i), cube_ur(b, i));
     }
-    r->real_value = sum;
-    r->type = VEF_RESULT_VALUE;
+    r.set(sum);
   } catch (...) {
-    r->type = VEF_RESULT_ERROR;
-    snprintf(r->error_msg, VEF_MAX_ERROR_LEN,
-             "cube_taxicab_distance: internal error");
+    r.error("cube_taxicab_distance: internal error");
   }
 }
 
 // CUBE_CHEBYSHEV_DISTANCE(a, b) → REAL  (L-inf / Chebyshev)
-void cube_chebyshev_distance_impl(vef_context_t *, vef_invalue_t *a_arg,
-                                  vef_invalue_t *b_arg, vef_vdf_result_t *r) {
+void cube_chebyshev_distance_impl(CustomArg a_arg, CustomArg b_arg,
+                                   RealResult r) {
   try {
-    if (a_arg->is_null || b_arg->is_null) { r->type = VEF_RESULT_NULL; return; }
-    int a_slots = cube_n_slots(a_arg->bin_len), b_slots = cube_n_slots(b_arg->bin_len);
+    if (a_arg.is_null() || b_arg.is_null()) { r.set_null(); return; }
+    auto as = a_arg.value(), bs = b_arg.value();
+    int a_slots = cube_n_slots(as.size()), b_slots = cube_n_slots(bs.size());
     if (a_slots < 0 || b_slots < 0) {
-      r->type = VEF_RESULT_ERROR;
-      snprintf(r->error_msg, VEF_MAX_ERROR_LEN,
-               "cube_chebyshev_distance: invalid input");
+      r.error("cube_chebyshev_distance: invalid input");
       return;
     }
     CubeData a, b;
-    cube_from_buf(a_arg->bin_value, a_slots, &a);
-    cube_from_buf(b_arg->bin_value, b_slots, &b);
+    cube_from_buf(as.data(), a_slots, &a);
+    cube_from_buf(bs.data(), b_slots, &b);
     int nd = max_dim(a, b);
     double mx = 0.0;
     for (int i = 0; i < nd; i++) {
@@ -1088,12 +1065,9 @@ void cube_chebyshev_distance_impl(vef_context_t *, vef_invalue_t *a_arg,
                               cube_ll(b, i), cube_ur(b, i));
       if (g > mx) mx = g;
     }
-    r->real_value = mx;
-    r->type = VEF_RESULT_VALUE;
+    r.set(mx);
   } catch (...) {
-    r->type = VEF_RESULT_ERROR;
-    snprintf(r->error_msg, VEF_MAX_ERROR_LEN,
-             "cube_chebyshev_distance: internal error");
+    r.error("cube_chebyshev_distance: internal error");
   }
 }
 
@@ -1102,19 +1076,19 @@ void cube_chebyshev_distance_impl(vef_context_t *, vef_invalue_t *a_arg,
 // =============================================================================
 
 // CUBE_UNION(a, b) → cube
-void cube_union_impl(vef_context_t *, vef_invalue_t *a_arg,
-                     vef_invalue_t *b_arg, vef_vdf_result_t *r) {
+void cube_union_impl(CustomArg a_arg, CustomArg b_arg,
+                     CustomResultWith<CubeParams> out) {
   try {
-    if (a_arg->is_null || b_arg->is_null) { r->type = VEF_RESULT_NULL; return; }
-    int a_slots = cube_n_slots(a_arg->bin_len), b_slots = cube_n_slots(b_arg->bin_len);
+    if (a_arg.is_null() || b_arg.is_null()) { out.set_null(); return; }
+    auto as = a_arg.value(), bs = b_arg.value();
+    int a_slots = cube_n_slots(as.size()), b_slots = cube_n_slots(bs.size());
     if (a_slots < 0 || b_slots < 0) {
-      r->type = VEF_RESULT_ERROR;
-      snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_union: invalid input");
+      out.error("cube_union: invalid input");
       return;
     }
     CubeData a, b, result;
-    cube_from_buf(a_arg->bin_value, a_slots, &a);
-    cube_from_buf(b_arg->bin_value, b_slots, &b);
+    cube_from_buf(as.data(), a_slots, &a);
+    cube_from_buf(bs.data(), b_slots, &b);
     memset(&result, 0, sizeof(result));
     result.ndim = static_cast<uint16_t>(max_dim(a, b));
     for (int i = 0; i < result.ndim; i++) {
@@ -1122,27 +1096,26 @@ void cube_union_impl(vef_context_t *, vef_invalue_t *a_arg,
       result.ur[i] = std::max(cube_ur(a, i), cube_ur(b, i));
     }
     cube_normalize(&result);
-    set_cube_result(result, r);
+    set_cube_result_typed(result, out);
   } catch (...) {
-    r->type = VEF_RESULT_ERROR;
-    snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_union: internal error");
+    out.error("cube_union: internal error");
   }
 }
 
 // CUBE_INTER(a, b) → cube
-void cube_inter_impl(vef_context_t *, vef_invalue_t *a_arg,
-                     vef_invalue_t *b_arg, vef_vdf_result_t *r) {
+void cube_inter_impl(CustomArg a_arg, CustomArg b_arg,
+                     CustomResultWith<CubeParams> out) {
   try {
-    if (a_arg->is_null || b_arg->is_null) { r->type = VEF_RESULT_NULL; return; }
-    int a_slots = cube_n_slots(a_arg->bin_len), b_slots = cube_n_slots(b_arg->bin_len);
+    if (a_arg.is_null() || b_arg.is_null()) { out.set_null(); return; }
+    auto as = a_arg.value(), bs = b_arg.value();
+    int a_slots = cube_n_slots(as.size()), b_slots = cube_n_slots(bs.size());
     if (a_slots < 0 || b_slots < 0) {
-      r->type = VEF_RESULT_ERROR;
-      snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_inter: invalid input");
+      out.error("cube_inter: invalid input");
       return;
     }
     CubeData a, b, result;
-    cube_from_buf(a_arg->bin_value, a_slots, &a);
-    cube_from_buf(b_arg->bin_value, b_slots, &b);
+    cube_from_buf(as.data(), a_slots, &a);
+    cube_from_buf(bs.data(), b_slots, &b);
     memset(&result, 0, sizeof(result));
     result.ndim = static_cast<uint16_t>(max_dim(a, b));
     bool is_point = true;
@@ -1154,37 +1127,36 @@ void cube_inter_impl(vef_context_t *, vef_invalue_t *a_arg,
       if (result.ll[i] != result.ur[i]) is_point = false;
     }
     if (is_point) result.flags |= kFlagIsPoint;
-    set_cube_result(result, r);
+    set_cube_result_typed(result, out);
   } catch (...) {
-    r->type = VEF_RESULT_ERROR;
-    snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_inter: internal error");
+    out.error("cube_inter: internal error");
   }
 }
 
 // CUBE_ENLARGE(c cube, radius REAL, n_dims INT) → cube
-void cube_enlarge_impl(vef_context_t *, vef_invalue_t *c_arg,
-                       vef_invalue_t *r_arg, vef_invalue_t *n_arg,
-                       vef_vdf_result_t *res) {
+void cube_enlarge_impl(CustomArg c_arg, RealArg r_arg, IntArg n_arg,
+                       CustomResultWith<CubeParams> out) {
   try {
-    if (c_arg->is_null || r_arg->is_null || n_arg->is_null) {
-      res->type = VEF_RESULT_NULL; return;
+    if (c_arg.is_null() || r_arg.is_null() || n_arg.is_null()) {
+      out.set_null(); return;
     }
-    int n_slots = cube_n_slots(c_arg->bin_len);
+    auto span = c_arg.value();
+    int n_slots = cube_n_slots(span.size());
     if (n_slots < 0) {
-      res->type = VEF_RESULT_ERROR;
-      snprintf(res->error_msg, VEF_MAX_ERROR_LEN, "cube_enlarge: invalid input");
+      out.error("cube_enlarge: invalid input");
       return;
     }
     CubeData c;
-    cube_from_buf(c_arg->bin_value, n_slots, &c);
-    double radius = r_arg->real_value;
+    cube_from_buf(span.data(), n_slots, &c);
+    double radius = r_arg.value();
     // Negative radius shrinks the cube. If shrinkage inverts lo and hi,
     // both collapse to the midpoint (see below). Matches PostgreSQL behavior.
-    long long n = n_arg->int_value;
+    long long n = n_arg.value();
     if (n < 0 || n > kAbsoluteMaxDims) {
-      res->type = VEF_RESULT_ERROR;
-      snprintf(res->error_msg, VEF_MAX_ERROR_LEN,
+      char msg[VEF_MAX_ERROR_LEN];
+      snprintf(msg, sizeof(msg),
                "cube_enlarge: n_dims %lld out of range (0..%d)", n, kAbsoluteMaxDims);
+      out.error(msg);
       return;
     }
 
@@ -1213,32 +1185,31 @@ void cube_enlarge_impl(vef_context_t *, vef_invalue_t *c_arg,
       }
     }
     cube_normalize(&result);
-    set_cube_result(result, res);
+    set_cube_result_typed(result, out);
   } catch (...) {
-    res->type = VEF_RESULT_ERROR;
-    snprintf(res->error_msg, VEF_MAX_ERROR_LEN, "cube_enlarge: internal error");
+    out.error("cube_enlarge: internal error");
   }
 }
 
 // CUBE_SUBSET(c cube, dims_csv STRING) → cube
 // dims_csv: comma-separated 1-indexed dimension numbers
-void cube_subset_impl(vef_context_t *, vef_invalue_t *c_arg,
-                      vef_invalue_t *dims_arg, vef_vdf_result_t *r) {
+void cube_subset_impl(CustomArg c_arg, StringArg dims_arg,
+                      CustomResultWith<CubeParams> out) {
   try {
-    if (c_arg->is_null || dims_arg->is_null) { r->type = VEF_RESULT_NULL; return; }
-    int n_slots = cube_n_slots(c_arg->bin_len);
+    if (c_arg.is_null() || dims_arg.is_null()) { out.set_null(); return; }
+    auto span = c_arg.value();
+    int n_slots = cube_n_slots(span.size());
     if (n_slots < 0) {
-      r->type = VEF_RESULT_ERROR;
-      snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_subset: invalid input");
+      out.error("cube_subset: invalid input");
       return;
     }
     CubeData c;
-    cube_from_buf(c_arg->bin_value, n_slots, &c);
+    cube_from_buf(span.data(), n_slots, &c);
 
     // Parse dimension list
     int dims[kAbsoluteMaxDims];
     int n_dims = 0;
-    std::string_view sv(dims_arg->str_value, dims_arg->str_len);
+    std::string_view sv = dims_arg.value();
     size_t pos = 0;
     while (pos <= sv.size()) {
       size_t comma = sv.find(',', pos);
@@ -1251,8 +1222,7 @@ void cube_subset_impl(vef_context_t *, vef_invalue_t *c_arg,
         tok = tok.substr(s, e - s + 1);
         char tmp[16];
         if (tok.size() >= sizeof(tmp)) {
-          r->type = VEF_RESULT_ERROR;
-          snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_subset: dim token too long");
+          out.error("cube_subset: dim token too long");
           return;
         }
         memcpy(tmp, tok.data(), tok.size());
@@ -1261,15 +1231,14 @@ void cube_subset_impl(vef_context_t *, vef_invalue_t *c_arg,
         errno = 0;
         long dim = strtol(tmp, &endptr, 10);
         if (errno == ERANGE || endptr != tmp + tok.size() || dim < 1 || dim > c.ndim) {
-          r->type = VEF_RESULT_ERROR;
-          snprintf(r->error_msg, VEF_MAX_ERROR_LEN,
+          char msg[VEF_MAX_ERROR_LEN];
+          snprintf(msg, sizeof(msg),
                    "cube_subset: dim %ld out of range (1..%d)", dim, c.ndim);
+          out.error(msg);
           return;
         }
         if (n_dims >= kAbsoluteMaxDims) {
-          r->type = VEF_RESULT_ERROR;
-          snprintf(r->error_msg, VEF_MAX_ERROR_LEN,
-                   "cube_subset: too many dims in list");
+          out.error("cube_subset: too many dims in list");
           return;
         }
         dims[n_dims++] = static_cast<int>(dim - 1);  // convert to 0-indexed
@@ -1278,8 +1247,7 @@ void cube_subset_impl(vef_context_t *, vef_invalue_t *c_arg,
       pos = comma + 1;
     }
     if (n_dims == 0) {
-      r->type = VEF_RESULT_ERROR;
-      snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_subset: empty dim list");
+      out.error("cube_subset: empty dim list");
       return;
     }
 
@@ -1291,10 +1259,9 @@ void cube_subset_impl(vef_context_t *, vef_invalue_t *c_arg,
       result.ur[i] = (c.flags & kFlagIsPoint) ? c.ll[dims[i]] : c.ur[dims[i]];
     }
     cube_normalize(&result);
-    set_cube_result(result, r);
+    set_cube_result_typed(result, out);
   } catch (...) {
-    r->type = VEF_RESULT_ERROR;
-    snprintf(r->error_msg, VEF_MAX_ERROR_LEN, "cube_subset: internal error");
+    out.error("cube_subset: internal error");
   }
 }
 
@@ -1310,7 +1277,7 @@ using CubeAggState = std::optional<CubeData>;
 
 void cube_agg_clear(CubeAggState &state) { state = std::nullopt; }
 
-void cube_agg_accumulate(CubeAggState &state, villagesql::CustomArg arg) {
+void cube_agg_accumulate(CubeAggState &state, CustomArg arg) {
   if (arg.is_null()) return;
   auto span = arg.value();
   int n_slots = cube_n_slots(span.size());
@@ -1354,7 +1321,7 @@ struct CubeScalarAggState {
 
 void cube_scalar_agg_clear(CubeScalarAggState &state) { state = {}; }
 
-void cube_scalar_agg_accumulate(CubeScalarAggState &state, villagesql::RealArg arg) {
+void cube_scalar_agg_accumulate(CubeScalarAggState &state, RealArg arg) {
   double v = arg.value();
   if (!state.initialized) {
     state.lo = state.hi = v;
@@ -1382,26 +1349,25 @@ void cube_scalar_agg_result(vef_context_t *, vef_vdf_args_t *args,
 // Extension Registration
 // =============================================================================
 
-VEF_GENERATE_ENTRY_POINTS(
-  make_extension("vsql_cube", "1.0.0")
+constexpr auto CUBE = vsql::make_type<kCubeName>()
+    .persisted_length(-1)
+    .max_decode_buffer_length(static_cast<int64_t>(kMaxDecodeLen))
+    .params<CubeParams, &CubeParams::parse>()
+    .int_to_params<&cube_int_to_params>()
+    .resolve_params<&cube_resolve_params>()
+    .from_string<&cube_encode>()
+    .to_string<&cube_decode>()
+    .compare<&cube_compare>()
+    .intrinsic_default_str("(0)")
+    .build();
 
-    // Type parameter VDFs (not user-callable; used by the type system).
-    // Registered before the type so the server can resolve them on load.
-    .func(make_int_to_params<&cube_int_to_params>("cube::int_to_params"))
-    .func(make_resolve_params<&cube_resolve_params>("cube::resolve_params"))
+using namespace vsql;
+
+VEF_GENERATE_ENTRY_POINTS(
+  make_extension()
 
     // Custom type
-    .type(make_type(CUBE)
-      .persisted_length(-1)
-      .max_decode_buffer_length(static_cast<int64_t>(kMaxDecodeLen))
-      .params<CubeParams, &CubeParams::parse>()
-      .int_to_params("cube::int_to_params")
-      .resolve_params("cube::resolve_params")
-      .encode(&cube_encode)
-      .decode(&cube_decode)
-      .compare(&cube_compare)
-      .intrinsic_default_str("(0)")
-      .build())
+    .type(CUBE)
 
     // String conversion functions
     .func(make_func<&cube_from_string_impl>("cube_from_string")
