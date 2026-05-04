@@ -26,6 +26,7 @@ vsql_cube/
 
 ## Prerequisites
 
+- VillageSQL 0.0.4 or later (requires Protocol 2 SDK)
 - VillageSQL build directory (with completed build)
 - VillageSQL server source directory (required for Protocol 2 SDK headers)
 - CMake 3.16 or higher
