@@ -42,7 +42,7 @@
 #include <string>
 #include <string_view>
 
-using namespace vsql;
+using namespace villagesql;
 
 // =============================================================================
 // Constants
@@ -370,7 +370,7 @@ bool cube_int_to_params(int64_t value,
 
 // Validates the params map and computes storage sizes for this instantiation.
 bool cube_resolve_params(const std::map<std::string, std::string> &params,
-                         vsql::ResolvedTypeParams *result,
+                         villagesql::ResolvedTypeParams *result,
                          char *error_msg) {
   auto it = params.find("n");
   if (it == params.end()) {
