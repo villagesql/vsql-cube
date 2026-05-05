@@ -63,7 +63,7 @@ constexpr size_t kMaxStorageSize     = 1608; // 8 + 2*100*8, buffer_size for VDF
 constexpr size_t kMaxDecodeLen       = 5200; // output buffer for cube_to_string
 ```
 
-### Function inventory (23 total)
+### Function inventory (24 total)
 
 - **Constructors**: `cube_point`, `cube_box`, `cube_point_nd`, `cube_box_nd`, `cube_add_dim`
 - **String I/O**: `cube_from_string`, `cube_to_string`
