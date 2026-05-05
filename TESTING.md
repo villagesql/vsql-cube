@@ -46,18 +46,18 @@ The extension must be installed (VEB in `veb_dir`) before running tests. MTR ins
 **Linux:**
 ```bash
 cd $HOME/build/villagesql/mysql-test
-perl mysql-test-run.pl --suite=/path/to/vsql_cube/test
+perl mysql-test-run.pl --suite=/path/to/vsql_cube/mysql-test
 ```
 
 **macOS:**
 ```bash
 cd ~/build/villagesql/mysql-test
-perl mysql-test-run.pl --suite=/path/to/vsql_cube/test
+perl mysql-test-run.pl --suite=/path/to/vsql_cube/mysql-test
 ```
 
 **With parallel execution:**
 ```bash
-perl mysql-test-run.pl --suite=/path/to/vsql_cube/test --parallel=auto
+perl mysql-test-run.pl --suite=/path/to/vsql_cube/mysql-test --parallel=auto
 ```
 
 ## Regenerating Result Files
@@ -66,16 +66,16 @@ If you modify test cases or the extension behavior changes, regenerate expected 
 
 ```bash
 cd $VillageSQL_BUILD_DIR/mysql-test
-perl mysql-test-run.pl --suite=/path/to/vsql_cube/test --record
+perl mysql-test-run.pl --suite=/path/to/vsql_cube/mysql-test --record
 ```
 
-This overwrites `test/r/*.result`. Review the diff before committing.
+This overwrites `mysql-test/r/*.result`. Review the diff before committing.
 
 ## Test Files
 
 | Test file | What it covers |
 |-----------|---------------|
-| `t/vsql_cube.test` | Constructors, string I/O, accessors (including out-of-range NULL returns), predicates, distance functions (point-to-point and box-to-box), geometry functions, aggregates (`cube_agg`, `cube_scalar_agg`), NULL handling |
+| `mysql-test/t/vsql_cube.test` | Constructors, string I/O, accessors (including out-of-range NULL returns), predicates, distance functions (point-to-point and box-to-box), geometry functions, aggregates (`cube_agg`, `cube_scalar_agg`), NULL handling |
 
 ## Verifying the Server is Running
 
