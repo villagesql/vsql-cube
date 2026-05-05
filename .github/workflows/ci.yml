@@ -40,6 +40,7 @@ jobs:
           cd extension/build
           cmake .. \
             -DVillageSQL_BUILD_DIR=../villagesql-server/build \
+            -DVillageSQL_SOURCE_DIR=../villagesql-server \
             -DVillageSQL_VEB_INSTALL_DIR=${GITHUB_WORKSPACE}/output
           make -j$(nproc) install
       - name: Upload Artifacts
