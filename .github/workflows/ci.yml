@@ -7,7 +7,6 @@ jobs:
     strategy:
       matrix:
         vsql:
-          - "0.0.2"
           - "main"
     runs-on: ubuntu-latest
     steps:
@@ -40,7 +39,8 @@ jobs:
           mkdir extension/build
           cd extension/build
           cmake .. \
-            -DVillageSQL_BUILD_DIR=../villagesql-server/build \
+            -DVillageSQL_BUILD_DIR=${GITHUB_WORKSPACE}/villagesql-server/build \
+            -DVillageSQL_SOURCE_DIR=${GITHUB_WORKSPACE}/villagesql-server \
             -DVillageSQL_VEB_INSTALL_DIR=${GITHUB_WORKSPACE}/output
           make -j$(nproc) install
       - name: Upload Artifacts

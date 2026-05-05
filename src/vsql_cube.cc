@@ -1351,7 +1351,7 @@ void cube_scalar_agg_result(vef_context_t *, vef_vdf_args_t *args,
 // Extension Registration
 // =============================================================================
 
-constexpr auto CUBE = vsql::make_type<kCubeName>()
+constexpr auto CUBE = ::vsql::make_type<kCubeName>()
     .persisted_length(-1)
     .max_decode_buffer_length(static_cast<int64_t>(kMaxDecodeLen))
     .params<CubeParams, &CubeParams::parse>()
@@ -1363,7 +1363,7 @@ constexpr auto CUBE = vsql::make_type<kCubeName>()
     .intrinsic_default_str("(0)")
     .build();
 
-using namespace vsql;
+using namespace ::vsql;
 
 VEF_GENERATE_ENTRY_POINTS(
   make_extension()
