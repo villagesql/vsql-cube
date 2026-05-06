@@ -149,22 +149,20 @@ If `cube_compare` receives a buffer with an invalid layout (not `8 + 2*n*8` byte
 it uses a defined total order: invalid buffers sort before valid ones. Both invalid → equal
 (return 0); one invalid → the invalid one is smaller.
 
-### Aggregate functions: raw ABI for the result function
+### Aggregate functions: make_aggregate_func with CustomResultWith
 
-`AggResultWrapper` only handles `long long`, `double`, and `std::string` — not custom binary
-types. The aggregate result function must use the raw ABI:
+Use `make_aggregate_func<State, &result_fn>()` for all aggregate VDFs. The result function
+takes `void(const State&, CustomResultWith<CubeParams>)`. Prerun/postrun are auto-generated;
+no `.state<>()` call is needed.
 
 ```cpp
-void cube_agg_result(vef_context_t *, vef_vdf_args_t *args, vef_vdf_result_t *out) {
-  const auto &state = *static_cast<CubeAggState *>(args->user_data);
-  if (!state.has_value()) { out->type = VEF_RESULT_NULL; return; }
-  set_cube_result(*state, out);
+void cube_agg_result(const CubeAggState &state, CustomResultWith<CubeParams> out) {
+  if (!state.has_value()) { out.set_null(); return; }
+  set_cube_result_typed(*state, out);
 }
 
-// Registered without '&' (raw ABI, not typed wrapper):
-.func(make_func<cube_agg_result>("cube_agg")
+.func(make_aggregate_func<CubeAggState, &cube_agg_result>("cube_agg")
   .returns(CUBE).param(CUBE)
-  .state<CubeAggState>()
   .clear<&cube_agg_clear>()
   .accumulate<&cube_agg_accumulate>()
   .buffer_size(kMaxStorageSize).build())

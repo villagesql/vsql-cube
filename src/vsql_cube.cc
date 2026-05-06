@@ -464,48 +464,7 @@ int cube_compare(Span<const unsigned char> a, Span<const unsigned char> b) {
 // Helper: write cube result from CubeData
 // =============================================================================
 
-// Get n_slots from the column's type params at result-write time.
-// Returns kDefaultMaxDims when there is no column context (bare SELECT, etc.).
-static int n_slots_from_result(const vef_vdf_result_t *result) {
-  const vef_type_params_t &tp = result->type_params;
-  for (unsigned i = 0; i < tp.count; i++) {
-    if (strcmp(tp.keys[i], "n") == 0) {
-      errno = 0;
-      char *ep;
-      long long n = strtoll(tp.values[i], &ep, 10);
-      if (errno == 0 && ep != tp.values[i] && *ep == '\0' &&
-          n >= 1 && n <= kAbsoluteMaxDims) {
-        return static_cast<int>(n);
-      }
-      break;
-    }
-  }
-  return kDefaultMaxDims;
-}
-
-// Used by aggregate result functions which receive vef_vdf_result_t* directly.
-static void set_cube_result(const CubeData &c, vef_vdf_result_t *result) {
-  int n_slots;
-  if (result->type_params.count > 0) {
-    n_slots = n_slots_from_result(result);
-    if (c.ndim > n_slots) {
-      result->type = VEF_RESULT_ERROR;
-      snprintf(result->error_msg, VEF_MAX_ERROR_LEN,
-               "cube: value has %d dimensions but column allows %d",
-               static_cast<int>(c.ndim), n_slots);
-      return;
-    }
-  } else {
-    // No column context: write exactly as many slots as the cube actually uses.
-    n_slots = static_cast<int>(c.ndim);
-    if (n_slots < 1) n_slots = 1;
-  }
-  cube_to_buf(&c, result->bin_buf, n_slots);
-  result->actual_len = static_cast<size_t>(8 + 2 * n_slots * sizeof(double));
-  result->type = VEF_RESULT_VALUE;
-}
-
-// Used by typed VDF functions returning CUBE.
+// Used by VDF and aggregate functions returning CUBE.
 // out.params().n is the column's declared dimension (kDefaultMaxDims if no
 // column context, since CubeParams::parse defaults to kDefaultMaxDims).
 static void set_cube_result_typed(const CubeData &c,
@@ -1300,14 +1259,10 @@ void cube_agg_accumulate(CubeAggState &state, CustomArg arg) {
   cube_normalize(&cur);
 }
 
-// Raw ABI result: AggResultWrapper only handles scalar return types (long long,
-// double, string). Custom binary types must use the raw vef_vdf_func_t
-// signature so build() routes them directly without wrapping.
-void cube_agg_result(vef_context_t *, vef_vdf_args_t *args,
-                     vef_vdf_result_t *out) {
-  const auto &state = *static_cast<CubeAggState *>(args->user_data);
-  if (!state.has_value()) { out->type = VEF_RESULT_NULL; return; }
-  set_cube_result(*state, out);
+void cube_agg_result(const CubeAggState &state,
+                     CustomResultWith<CubeParams> out) {
+  if (!state.has_value()) { out.set_null(); return; }
+  set_cube_result_typed(*state, out);
 }
 
 // CUBE_SCALAR_AGG(x REAL) → cube
@@ -1334,17 +1289,16 @@ void cube_scalar_agg_accumulate(CubeScalarAggState &state, RealArg arg) {
   if (v > state.hi) state.hi = v;
 }
 
-void cube_scalar_agg_result(vef_context_t *, vef_vdf_args_t *args,
-                            vef_vdf_result_t *out) {
-  const auto &state = *static_cast<CubeScalarAggState *>(args->user_data);
-  if (!state.initialized) { out->type = VEF_RESULT_NULL; return; }
+void cube_scalar_agg_result(const CubeScalarAggState &state,
+                            CustomResultWith<CubeParams> out) {
+  if (!state.initialized) { out.set_null(); return; }
   CubeData c;
   memset(&c, 0, sizeof(c));
   c.ndim = 1;
   c.ll[0] = state.lo;
   c.ur[0] = state.hi;
   cube_normalize(&c);
-  set_cube_result(c, out);
+  set_cube_result_typed(c, out);
 }
 
 // =============================================================================
@@ -1523,18 +1477,17 @@ VEF_GENERATE_ENTRY_POINTS(
       .build())
 
     // Aggregates
-    .func(make_func<cube_agg_result>("cube_agg")
+    .func(make_aggregate_func<CubeAggState, &cube_agg_result>("cube_agg")
       .returns(CUBE)
       .param(CUBE)
-      .state<CubeAggState>()
       .clear<&cube_agg_clear>()
       .accumulate<&cube_agg_accumulate>()
       .buffer_size(kMaxStorageSize)
       .build())
-    .func(make_func<cube_scalar_agg_result>("cube_scalar_agg")
+    .func(make_aggregate_func<CubeScalarAggState, &cube_scalar_agg_result>(
+              "cube_scalar_agg")
       .returns(CUBE)
       .param(REAL)
-      .state<CubeScalarAggState>()
       .clear<&cube_scalar_agg_clear>()
       .accumulate<&cube_scalar_agg_accumulate>()
       .buffer_size(kMaxStorageSize)
