@@ -395,24 +395,58 @@ bool cube_resolve_params(const std::map<std::string, std::string> &params,
 // Type Encode/Decode
 // =============================================================================
 
-bool cube_encode(std::string_view from, Span<unsigned char> buf,
-                 size_t *length) {
+// When p is known, n_slots is taken from p.value().n; the parsed cube must
+// have ndim <= n_slots. When p is unknown, n_slots is inferred from the
+// parsed cube's ndim and written back via p.set(). The encoded layout always
+// pads ll/ur out to n_slots doubles each.
+void cube_encode(MaybeParams<CubeParams> &p, std::string_view from,
+                 CustomResult out) {
   try {
-    int n_slots = cube_n_slots(buf.size());
-    if (n_slots < 0) return true;
     // Empty/whitespace-only input is invalid (matches PostgreSQL cube behavior)
-    const char *p = from.data();
+    const char *q = from.data();
     const char *end = from.data() + from.size();
-    p = skip_ws(p, end);
-    if (p == end) return true;
+    q = skip_ws(q, end);
+    if (q == end) {
+      out.warning("cube: invalid cube string");
+      return;
+    }
     CubeData c;
-    if (cube_parse(from.data(), from.size(), &c)) return true;
-    if (c.ndim > n_slots) return true;  // too many dims for this column type
+    if (cube_parse(from.data(), from.size(), &c)) {
+      out.warning("cube: invalid cube string");
+      return;
+    }
+
+    int n_slots;
+    if (p.is_known()) {
+      int64_t n = p.value().n;
+      if (n < 1 || n > kAbsoluteMaxDims) {
+        out.warning("cube: invalid dimension");
+        return;
+      }
+      n_slots = static_cast<int>(n);
+      if (c.ndim > n_slots) {
+        out.warning("cube: too many dimensions for declared cube(n)");
+        return;
+      }
+    } else {
+      n_slots = c.ndim < 1 ? 1 : c.ndim;
+      if (n_slots > kAbsoluteMaxDims) {
+        out.warning("cube: too many dimensions");
+        return;
+      }
+      p.set(CubeParams{static_cast<int64_t>(n_slots)});
+    }
+
+    size_t needed = 8 + 2 * static_cast<size_t>(n_slots) * sizeof(double);
+    auto buf = out.buffer();
+    if (buf.size() < needed) {
+      out.warning("cube: output buffer too small");
+      return;
+    }
     cube_to_buf(&c, buf.data(), n_slots);
-    *length = static_cast<size_t>(8 + 2 * n_slots * sizeof(double));
-    return false;
+    out.set_length(needed);
   } catch (...) {
-    return true;
+    out.error("cube: internal error");
   }
 }
 
