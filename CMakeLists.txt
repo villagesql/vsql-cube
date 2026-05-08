@@ -24,6 +24,9 @@ set(EXTENSION_NAME "vsql_cube")
 
 # Find VillageSQL SDK (for VEB creation macro and build infrastructure)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+# vsql_cube.cc uses the typed C++ API (<villagesql/vsql.h>), which lives in
+# the dev (unstable) ABI include tree.
+set(VSQL_USE_DEV_ABI ON)
 find_package(VillageSQL REQUIRED)
 
 message(STATUS "VillageSQL SDK found at: ${VillageSQL_PREFIX}")
