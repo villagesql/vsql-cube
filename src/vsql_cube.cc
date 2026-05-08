@@ -418,14 +418,13 @@ void cube_encode(MaybeParams<CubeParams> &p, std::string_view from,
 
     int n_slots;
     if (p.is_known()) {
-      int64_t n = p.value().n;
-      if (n < 1 || n > kAbsoluteMaxDims) {
-        out.warning("cube: invalid dimension");
+      if (p.value().n < 1 || p.value().n > kAbsoluteMaxDims) {
+        out.error("cube: invalid dimension");
         return;
       }
-      n_slots = static_cast<int>(n);
+      n_slots = static_cast<int>(p.value().n);
       if (c.ndim > n_slots) {
-        out.warning("cube: too many dimensions for declared cube(n)");
+        out.error("cube: too many dimensions for declared cube(n)");
         return;
       }
     } else {
@@ -440,7 +439,7 @@ void cube_encode(MaybeParams<CubeParams> &p, std::string_view from,
     size_t needed = 8 + 2 * static_cast<size_t>(n_slots) * sizeof(double);
     auto buf = out.buffer();
     if (buf.size() < needed) {
-      out.warning("cube: output buffer too small");
+      out.error("cube: output buffer too small");
       return;
     }
     cube_to_buf(&c, buf.data(), n_slots);
