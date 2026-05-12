@@ -353,17 +353,17 @@ struct CubeParams {
     if (it != params.end()) dim = strtoll(it->second.c_str(), nullptr, 10);
     return CubeParams{dim};
   }
-};
 
-// Inverse of CubeParams::parse: render a typed CubeParams back into the
-// canonical key/value string form. Used by paths that produce a typed P at
-// runtime (e.g., constant-string from_string pre-execute at fix_fields time)
-// and need to publish the equivalent string-form params back to the server.
-// Mirrors what cube_int_to_params emits for the integer-syntax case.
-void cube_params_to_strings(const CubeParams &p,
-                            std::map<std::string, std::string> &out) {
-  out["n"] = std::to_string(p.n);
-}
+  // Inverse of parse: render a typed CubeParams back into the canonical
+  // key/value string form. Used by paths that produce a typed P at runtime
+  // (e.g., constant-string from_string pre-execute at fix_fields time) and
+  // need to publish the equivalent string-form params back to the server.
+  // Mirrors what cube_int_to_params emits for the integer-syntax case.
+  static void to_strings(const CubeParams &p,
+                         std::map<std::string, std::string> &out) {
+    out["n"] = std::to_string(p.n);
+  }
+};
 
 // Called when SQL uses bare integer syntax: cube(32) → {"n" → "32"}.
 bool cube_int_to_params(int64_t value,
@@ -1353,7 +1353,7 @@ constexpr auto CUBE =
     ::vsql::make_type<kCubeName>()
         .persisted_length(-1)
         .max_decode_buffer_length(static_cast<int64_t>(kMaxDecodeLen))
-        .params<CubeParams, &CubeParams::parse, &cube_params_to_strings>()
+        .params<CubeParams, &CubeParams::parse, &CubeParams::to_strings>()
         .int_to_params<&cube_int_to_params>()
         .resolve_params<&cube_resolve_params>()
         .from_string<&cube_encode>()
