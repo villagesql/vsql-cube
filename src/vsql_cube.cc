@@ -460,26 +460,34 @@ void cube_encode(MaybeParams<CubeParams> &p, std::string_view from,
   }
 }
 
-bool cube_decode(Span<const unsigned char> buf, Span<char> out,
-                 size_t *out_len) {
+void cube_decode(CustomArg in, StringResult out) {
   try {
+    auto buf = in.value();
     int n_slots = cube_n_slots(buf.size());
-    if (n_slots < 0) return true;
+    if (n_slots < 0) {
+      out.error("cube_decode: invalid input");
+      return;
+    }
     CubeData c;
     cube_from_buf(buf.data(), n_slots, &c);
-    size_t n = cube_format(c, out.data(), out.size());
-    if (n == 0) return true;
-    *out_len = n;
-    return false;
+    auto dst = out.buffer();
+    size_t n = cube_format(c, dst.data(), dst.size());
+    if (n == 0) {
+      out.error("cube_decode: output buffer too small");
+      return;
+    }
+    out.set_length(n);
   } catch (...) {
-    return true;
+    out.error("cube_decode: internal error");
   }
 }
 
-int cube_compare(Span<const unsigned char> a, Span<const unsigned char> b) {
+int cube_compare(CustomArg a, CustomArg b) {
   try {
-    int a_slots = cube_n_slots(a.size());
-    int b_slots = cube_n_slots(b.size());
+    auto va = a.value();
+    auto vb = b.value();
+    int a_slots = cube_n_slots(va.size());
+    int b_slots = cube_n_slots(vb.size());
     // Invalid/truncated buffer: establish a defined total order.
     // Invalid sorts before valid.
     if (a_slots < 0 || b_slots < 0) {
@@ -487,8 +495,8 @@ int cube_compare(Span<const unsigned char> a, Span<const unsigned char> b) {
       return (a_slots < 0) ? -1 : 1;
     }
     CubeData ca, cb;
-    cube_from_buf(a.data(), a_slots, &ca);
-    cube_from_buf(b.data(), b_slots, &cb);
+    cube_from_buf(va.data(), a_slots, &ca);
+    cube_from_buf(vb.data(), b_slots, &cb);
     int max_d = std::max(ca.ndim, cb.ndim);
     for (int i = 0; i < max_d; i++) {
       double la = cube_ll(ca, i), lb = cube_ll(cb, i);
