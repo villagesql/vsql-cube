@@ -119,24 +119,24 @@ DROP TABLE t_scalar;
 --echo # Error handling: invalid string inputs
 --echo #
 
---error 3200
+--error ER_VILLAGESQL_GENERIC_ERROR
 SELECT cube_from_string('');
---error 3200
+--error ER_VILLAGESQL_GENERIC_ERROR
 SELECT cube_from_string('(nan)');
---error 3200
+--error ER_VILLAGESQL_GENERIC_ERROR
 SELECT cube_from_string('(inf)');
---error 3200
+--error ER_VILLAGESQL_GENERIC_ERROR
 SELECT cube_from_string('(1,2),(3)');
---error 3200
+--error ER_VILLAGESQL_GENERIC_ERROR
 SELECT cube_from_string('not a cube');
 
 --echo #
 --echo # Error handling: NaN/Inf in CSV constructors
 --echo #
 
---error 3200
+--error ER_VILLAGESQL_GENERIC_ERROR
 SELECT cube_point_nd('1.0,nan,3.0');
---error 3200
+--error ER_VILLAGESQL_GENERIC_ERROR
 SELECT cube_point_nd('1.0,inf,3.0');
 --error 3200
 SELECT cube_box_nd('1,nan', '4,5');
@@ -170,7 +170,7 @@ SELECT cube_dim(c) FROM _t100;
 DROP TABLE _t100;
 
 # 101 dimensions exceeds the absolute limit — must error
---error 3200
+--error ER_VILLAGESQL_GENERIC_ERROR
 SELECT cube_point_nd('1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101');
 
 # Large but finite coordinates must be accepted
