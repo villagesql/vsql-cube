@@ -460,7 +460,7 @@ void cube_encode(MaybeParams<CubeParams> &p, std::string_view from,
   }
 }
 
-void cube_decode(CustomArg in, StringResult out) {
+void cube_decode(CustomArgWith<CubeParams> in, StringResult out) {
   try {
     auto buf = in.value();
     int n_slots = cube_n_slots(buf.size());
@@ -482,7 +482,7 @@ void cube_decode(CustomArg in, StringResult out) {
   }
 }
 
-int cube_compare(CustomArg a, CustomArg b) {
+int cube_compare(CustomArgWith<CubeParams> a, CustomArgWith<CubeParams> b) {
   try {
     auto va = a.value();
     auto vb = b.value();
