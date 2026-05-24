@@ -7,8 +7,8 @@ This file provides guidance to Claude Code when working with the vsql_cube exten
 ## Project Overview
 
 vsql_cube is a VillageSQL extension implementing the `cube` custom type — an n-dimensional box/point
-representation compatible with PostgreSQL's cube extension. It uses the Protocol 2 SDK and the typed
-builder API. All implementation lives in a single source file: `src/vsql_cube.cc`.
+representation compatible with PostgreSQL's cube extension. It uses the Protocol V3 stable SDK and the
+typed builder API. All implementation lives in a single source file: `src/vsql_cube.cc`.
 
 ## Key Facts
 
@@ -20,16 +20,14 @@ builder API. All implementation lives in a single source file: `src/vsql_cube.cc
   - Bare `cube` = `cube(32)` = 520 bytes (kDefaultStorageSize)
   - Maximum: `cube(100)` = 1608 bytes (kMaxStorageSize)
 - **Max dimensions**: 100 absolute maximum (kAbsoluteMaxDims); default column width is 32 (kDefaultMaxDims)
-- **Protocol 2 SDK required**: `VillageSQL_SOURCE_DIR` must be set at cmake time; without it cmake
-  falls back to the staged SDK and VDFs returning custom types silently return NULL
+- **Protocol**: V3 stable (uses staged SDK via `VillageSQL_BUILD_DIR`; `VillageSQL_SOURCE_DIR` not required)
 
 ## Build
 
 ```bash
 mkdir build && cd build
 cmake .. \
-  -DVillageSQL_BUILD_DIR=/path/to/villagesql/build \
-  -DVillageSQL_SOURCE_DIR=/path/to/villagesql-server
+  -DVillageSQL_BUILD_DIR=/path/to/villagesql/build
 make -j$(getconf _NPROCESSORS_ONLN)
 make install
 ```
@@ -75,7 +73,7 @@ constexpr size_t kMaxDecodeLen       = 5200; // output buffer for cube_to_string
 
 ## VEF API Patterns
 
-This extension uses the Protocol 2 SDK throughout. Key patterns:
+This extension uses the Protocol V3 stable SDK throughout. Key patterns:
 
 ### Custom type registration
 
