@@ -1,6 +1,6 @@
 {
   "name": "vsql_cube",
-  "version": "1.0.0",
+  "version": "0.0.2",
   "description": "Multi-dimensional cube type and functions for VillageSQL",
   "author": "VillageSQL Contributors",
   "license": "GPL-2.0"
