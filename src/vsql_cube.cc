@@ -512,6 +512,45 @@ int cube_compare(CustomArgWith<CubeParams> a, CustomArgWith<CubeParams> b) {
   }
 }
 
+// cube_hash normalizes -0.0 to +0.0 before hashing. cube_compare uses IEEE 754
+// < / > which treats -0.0 == +0.0, so without this normalization the binary
+// fallback hash would assign -0.0 and +0.0 to different buckets while compare
+// considers them equal — producing wrong GROUP BY / dedup results.
+size_t cube_hash(CustomArgWith<CubeParams> a) {
+  try {
+    auto va = a.value();
+    int n_slots = cube_n_slots(va.size());
+    if (n_slots < 0) return 0;
+    CubeData ca;
+    cube_from_buf(va.data(), n_slots, &ca);
+    // FNV-1a over ndim, flags, and normalized coordinate bits.
+    size_t h = 14695981039346656037ULL;
+    auto mix = [&](uint64_t v) {
+      h ^= v;
+      h *= 1099511628211ULL;
+    };
+    mix(ca.ndim);
+    mix(ca.flags);
+    for (int i = 0; i < ca.ndim; i++) {
+      double v = (ca.ll[i] == 0.0) ? 0.0 : ca.ll[i];
+      uint64_t bits;
+      memcpy(&bits, &v, sizeof(bits));
+      mix(bits);
+    }
+    if (!(ca.flags & kFlagIsPoint)) {
+      for (int i = 0; i < ca.ndim; i++) {
+        double v = (ca.ur[i] == 0.0) ? 0.0 : ca.ur[i];
+        uint64_t bits;
+        memcpy(&bits, &v, sizeof(bits));
+        mix(bits);
+      }
+    }
+    return h;
+  } catch (...) {
+    return 0;
+  }
+}
+
 // =============================================================================
 // Helper: write cube result from CubeData
 // =============================================================================
@@ -1368,6 +1407,7 @@ constexpr auto CUBE =
         .from_string<&cube_encode>()
         .to_string<&cube_decode>()
         .compare<&cube_compare>()
+        .hash<&cube_hash>()
         .intrinsic_default_str("(0)")
         .build();
 

@@ -247,6 +247,22 @@ SELECT cube_to_string(cube_agg(c)) FROM t_agg_bounds;
 DROP TABLE t_agg_bounds;
 
 --echo #
+--echo # cube_hash normalizes -0.0 to +0.0 before hashing. cube_compare uses
+--echo # IEEE 754 < / > which treats -0.0 == +0.0, so without normalization the
+--echo # binary fallback hash assigns them different buckets while compare says
+--echo # they are equal — producing wrong GROUP BY / COUNT(DISTINCT) results.
+--echo # Note: this test asserts the correct result but cannot guarantee the
+--echo # optimizer routes through the hash path vs sort-based dedup. Hash
+--echo # correctness is verified by inspection of cube_hash in src/vsql_cube.cc.
+--echo #
+
+CREATE TABLE t_neg_zero (`c` `cube`(1) NOT NULL);
+INSERT INTO t_neg_zero VALUES ('(0)'), ('(-0.0)');
+# Both values compare equal; must produce 1 distinct value, not 2
+SELECT COUNT(DISTINCT `c`) AS distinct_count FROM t_neg_zero;
+DROP TABLE t_neg_zero;
+
+--echo #
 --echo # Cleanup
 --echo #
 
