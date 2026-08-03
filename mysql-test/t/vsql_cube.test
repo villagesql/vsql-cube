@@ -1,3 +1,10 @@
+# Setup: Copy VEB to veb_dir if VSQL_CUBE_VEB is set, then install extension
+--let $veb_dest = `SELECT CONCAT(@@veb_dir, '/veb')`
+if ($VSQL_CUBE_VEB) {
+  --error 0,1
+  --remove_file $veb_dest
+  --copy_file $VSQL_CUBE_VEB $veb_dest
+}
 INSTALL EXTENSION vsql_cube;
 
 CREATE TABLE _ta (id INT, c `cube`(32) NOT NULL);
@@ -261,6 +268,21 @@ INSERT INTO t_neg_zero VALUES ('(0)'), ('(-0.0)');
 # Both values compare equal; must produce 1 distinct value, not 2
 SELECT COUNT(DISTINCT `c`) AS distinct_count FROM t_neg_zero;
 DROP TABLE t_neg_zero;
+
+--echo #
+--echo # Dimensionality is part of a cube's identity. cube_hash keys on ndim,
+--echo # so cube_compare must treat cubes whose zero-extended coordinates match
+--echo # but whose ndim differ (e.g. (1,2) vs (1,2,0)) as unequal — otherwise
+--echo # compare==0 while hash differs, corrupting GROUP BY / COUNT(DISTINCT).
+--echo #
+CREATE TABLE t_ndim (`c` `cube`(3) NOT NULL);
+INSERT INTO t_ndim VALUES ('(1,2)'), ('(1,2,0)'), ('(1,2)');
+# (1,2) is ndim 2, (1,2,0) is ndim 3 -> two distinct values across three rows
+SELECT COUNT(*) AS rows_total, COUNT(DISTINCT `c`) AS distinct_count FROM t_ndim;
+# GROUP BY: the two identical (1,2) rows collapse, (1,2,0) is separate
+SELECT cube_to_string(`c`) AS cube_val, COUNT(*) AS n
+  FROM t_ndim GROUP BY `c` ORDER BY `c`;
+DROP TABLE t_ndim;
 
 --echo #
 --echo # Cleanup

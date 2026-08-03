@@ -506,6 +506,12 @@ int cube_compare(CustomArgWith<CubeParams> a, CustomArgWith<CubeParams> b) {
       if (ua < ub) return -1;
       if (ua > ub) return 1;
     }
+    // Dimensionality is part of a cube's identity. Two cubes whose
+    // zero-extended coordinates match but whose ndim differ (e.g. (1,2)
+    // vs (1,2,0)) must not compare equal: cube_hash keys on ndim, so
+    // treating them as equal here would break the compare==0 => hash-equal
+    // invariant and corrupt GROUP BY / COUNT(DISTINCT). Fewer dims sort first.
+    if (ca.ndim != cb.ndim) return (ca.ndim < cb.ndim) ? -1 : 1;
     return 0;
   } catch (...) {
     return 0;
