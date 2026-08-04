@@ -309,6 +309,23 @@ distinct_count
 1
 DROP TABLE t_neg_zero;
 #
+# Dimensionality is part of a cube's identity. cube_hash keys on ndim,
+# so cube_compare must treat cubes whose zero-extended coordinates match
+# but whose ndim differ (e.g. (1,2) vs (1,2,0)) as unequal — otherwise
+# compare==0 while hash differs, corrupting GROUP BY / COUNT(DISTINCT).
+#
+CREATE TABLE t_ndim (`c` `cube`(3) NOT NULL);
+INSERT INTO t_ndim VALUES ('(1,2)'), ('(1,2,0)'), ('(1,2)');
+SELECT COUNT(*) AS rows_total, COUNT(DISTINCT `c`) AS distinct_count FROM t_ndim;
+rows_total	distinct_count
+3	2
+SELECT cube_to_string(`c`) AS cube_val, COUNT(*) AS n
+FROM t_ndim GROUP BY `c` ORDER BY `c`;
+cube_val	n
+(1, 2)	2
+(1, 2, 0)	1
+DROP TABLE t_ndim;
+#
 # Cleanup
 #
 DROP TABLE _ta, _tab;
