@@ -257,6 +257,29 @@ Corners are normalized so lower-left ≤ upper-right on each dimension. `'(3,4),
 
 NaN and Inf are rejected in all string-parsing paths — `cube_from_string`, `cube_point_nd`, and `cube_box_nd` return error 3200 if any coordinate parses to a non-finite value.
 
+### Comparison and Ordering
+
+Cube values are compared dimension by dimension, up to the larger of the two
+dimensionalities. At each dimension the lower-left coordinate is compared first, then
+the upper-right. A cube with fewer dimensions is zero-extended: both corners read as
+`0` for the dimensions it does not have.
+
+Dimensionality is part of a cube's identity. If every extended coordinate ties, the
+cube with fewer dimensions sorts first, and two values are equal only when their
+dimensionality is also equal. So `(1, 2)` sorts before `(1, 2, 0)` and the two are
+distinct — they do not collapse together under `ORDER BY`, `GROUP BY`, or
+`COUNT(DISTINCT ...)`.
+
+```sql
+CREATE TABLE t (c `cube`(3) NOT NULL);
+INSERT INTO t VALUES ('(1,2)'), ('(1,2,0)');
+SELECT cube_to_string(c) FROM t ORDER BY c;
+-- (1, 2)
+-- (1, 2, 0)
+SELECT COUNT(DISTINCT c) FROM t;
+-- 2
+```
+
 ## Testing
 
 See [TESTING.md](TESTING.md) for build, install, and test-run instructions.
