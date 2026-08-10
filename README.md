@@ -26,13 +26,27 @@ vsql_cube/
 
 ## Prerequisites
 
-- VillageSQL 0.0.4 or later (requires Protocol 2 SDK)
+- VillageSQL 0.0.4 or later (requires Protocol 3 SDK)
 - VillageSQL build directory (with completed build)
-- VillageSQL server source directory (required for Protocol 2 SDK headers)
+- VillageSQL server source directory (required for Protocol 3 SDK headers)
 - CMake 3.16 or higher
 - C++ compiler with C++17 support
 
 📚 **Full Documentation**: Visit [villagesql.com/docs](https://villagesql.com/docs) for guides on building and installing extensions.
+
+## Installation
+
+If you installed VillageSQL with the install script, the Docker image, or a
+release tarball, `vsql_cube.veb` is already in the server's `lib/veb/`
+directory — this extension is bundled with the server. There is nothing to build
+or download:
+
+```sql
+INSTALL EXTENSION vsql_cube;
+```
+
+Build from source only if you built the server from source without the bundled
+extensions, or if you are working on this extension itself.
 
 ## Building the Extension
 
@@ -43,7 +57,7 @@ cd build
 cmake .. \
   -DVillageSQL_BUILD_DIR=$HOME/build/villagesql \
   -DVillageSQL_SOURCE_DIR=$HOME/code/villagesql-server
-make -j $(($(getconf _NPROCESSORS_ONLN) - 2))
+make -j $(getconf _NPROCESSORS_ONLN)
 ```
 
 **macOS:**
@@ -51,12 +65,12 @@ make -j $(($(getconf _NPROCESSORS_ONLN) - 2))
 mkdir build
 cd build
 cmake .. \
-  -DVillageSQL_BUILD_DIR=~/build/villagesql \
-  -DVillageSQL_SOURCE_DIR=~/code/villagesql-server
-make -j $(($(sysctl -n hw.logicalcpu) - 2))
+  -DVillageSQL_BUILD_DIR="$HOME/build/villagesql" \
+  -DVillageSQL_SOURCE_DIR="$HOME/code/villagesql-server"
+make -j $(sysctl -n hw.logicalcpu)
 ```
 
-`VillageSQL_BUILD_DIR` points to your VillageSQL build directory. `VillageSQL_SOURCE_DIR` points to the VillageSQL server source — required to pick up Protocol 2 SDK headers.
+`VillageSQL_BUILD_DIR` points to your VillageSQL build directory. `VillageSQL_SOURCE_DIR` points to the VillageSQL server source — required to pick up Protocol 3 SDK headers.
 
 To install the VEB:
 ```bash
@@ -234,12 +248,16 @@ SELECT cube_to_string(cube_agg(r)) FROM regions;  -- (1, 1),(5, 4)
 DROP TABLE regions;
 
 -- 1D interval spanning a set of scalars
-SELECT cube_to_string(cube_scalar_agg(x)) FROM (
+SELECT cube_scalar_agg(x) FROM (
   SELECT 1.0 AS x UNION ALL SELECT 5.0 UNION ALL SELECT 3.0
 ) t;  -- (1),(5)
 ```
 
-Both return NULL for empty groups.
+Both return NULL for empty groups. `cube_agg` takes its dimension from the
+input column, so its result composes with `cube_to_string` and the accessor
+functions. `cube_scalar_agg` builds a cube from plain REAL input and carries no
+dimension parameter, so wrapping it in `cube_to_string` (or `cube_dim`,
+`cube_ll_coord`, ...) raises ERROR 3219; select it directly instead.
 
 ### Input Format
 
@@ -255,7 +273,10 @@ All PostgreSQL cube string formats are accepted:
 | Bracket notation | `'[(1,2),(3,4)]'` | `(1, 2),(3, 4)` — 2D box |
 Corners are normalized so lower-left ≤ upper-right on each dimension. `'(3,4),(1,2)'` stores as `(1, 2),(3, 4)`.
 
-NaN and Inf are rejected in all string-parsing paths — `cube_from_string`, `cube_point_nd`, and `cube_box_nd` return error 3200 if any coordinate parses to a non-finite value.
+NaN and Inf are rejected in all string-parsing paths. The error code depends on
+where the rejection happens: `cube_from_string` and `cube_point_nd` on a literal
+raise ERROR 3219, `cube_box_nd` raises ERROR 3200, and a non-finite coordinate
+inserted through a cube column raises ERROR 1366.
 
 ### Comparison and Ordering
 
