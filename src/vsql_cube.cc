@@ -359,9 +359,21 @@ struct CubeParams {
   // (e.g., constant-string from_string) and need to publish the equivalent
   // string-form params back to the server. Mirrors what cube_int_to_params
   // emits for the integer-syntax case.
+  // Guarded: this VDF entry point has no way to signal failure to its caller
+  // (void return, no error_msg parameter), so an allocation failure here is
+  // swallowed rather than left to escape as an unguarded exception -- the SDK
+  // does not catch at this boundary, and an escaping exception crashes the
+  // whole server, not just the statement (proven live 2026-08-07).
   static void to_strings(const CubeParams &p,
                          std::map<std::string, std::string> &out) {
-    out["n"] = std::to_string(p.n);
+    try {
+      out["n"] = std::to_string(p.n);
+    } catch (...) {
+      // Best effort: leave "n" unset rather than let bad_alloc/length_error
+      // escape this entry point. A caller relying on the resulting map will
+      // see a missing key and fail its own validation instead of crashing
+      // the server.
+    }
   }
 };
 
@@ -374,7 +386,15 @@ bool cube_int_to_params(int64_t value,
              "cube: dimension must be 1..%d, got %" PRId64, kAbsoluteMaxDims, value);
     return true;
   }
-  params["n"] = std::to_string(value);
+  try {
+    params["n"] = std::to_string(value);
+  } catch (const std::exception &e) {
+    snprintf(error_msg, VEF_MAX_ERROR_LEN, "cube: %s", e.what());
+    return true;
+  } catch (...) {
+    snprintf(error_msg, VEF_MAX_ERROR_LEN, "cube: internal error");
+    return true;
+  }
   return false;
 }
 
@@ -1359,7 +1379,13 @@ void cube_agg_accumulate(CubeAggState &state, CustomArg arg) {
 void cube_agg_result(const CubeAggState &state,
                      CustomResultWith<CubeParams> out) {
   if (!state.has_value()) { out.set_null(); return; }
-  set_cube_result_typed(*state, out);
+  try {
+    set_cube_result_typed(*state, out);
+  } catch (const std::exception &e) {
+    out.error(e.what());
+  } catch (...) {
+    out.error("cube: internal error");
+  }
 }
 
 // CUBE_SCALAR_AGG(x REAL) → cube
@@ -1395,7 +1421,13 @@ void cube_scalar_agg_result(const CubeScalarAggState &state,
   c.ll[0] = state.lo;
   c.ur[0] = state.hi;
   cube_normalize(&c);
-  set_cube_result_typed(c, out);
+  try {
+    set_cube_result_typed(c, out);
+  } catch (const std::exception &e) {
+    out.error(e.what());
+  } catch (...) {
+    out.error("cube: internal error");
+  }
 }
 
 // =============================================================================

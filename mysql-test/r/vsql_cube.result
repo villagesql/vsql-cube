@@ -326,6 +326,26 @@ cube_val	n
 (1, 2, 0)	1
 DROP TABLE t_ndim;
 #
+# cube_agg_result/cube_scalar_agg_result (the aggregate result functions)
+# and the params-conversion helpers cube_int_to_params/CubeParams::to_strings
+# are exception-guarded rather than left to crash the whole server on an
+# internal allocation failure. This is a regression check that ordinary
+# aggregation through that guarded path still returns the correct value.
+#
+CREATE TABLE t_agg_narrow (c `cube`(3) NOT NULL);
+INSERT INTO t_agg_narrow VALUES ('(1, 2, 3)');
+INSERT INTO t_agg_narrow VALUES ('(4, 5, 6)');
+SELECT cube_to_string(cube_agg(c)) FROM t_agg_narrow;
+cube_to_string(cube_agg(c))
+(1, 2, 3),(4, 5, 6)
+DROP TABLE t_agg_narrow;
+CREATE TABLE t_scalar_agg_guard (x DOUBLE NOT NULL);
+INSERT INTO t_scalar_agg_guard VALUES (1.0), (5.0);
+SELECT cube_scalar_agg(x) FROM t_scalar_agg_guard;
+cube_scalar_agg(x)
+(1),(5)
+DROP TABLE t_scalar_agg_guard;
+#
 # Cleanup
 #
 DROP TABLE _ta, _tab;
