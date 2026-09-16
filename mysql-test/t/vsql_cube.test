@@ -285,6 +285,23 @@ SELECT cube_to_string(`c`) AS cube_val, COUNT(*) AS n
 DROP TABLE t_ndim;
 
 --echo #
+--echo # cube_agg_result/cube_scalar_agg_result (the aggregate result functions)
+--echo # and the params-conversion helpers cube_int_to_params/CubeParams::to_strings
+--echo # are exception-guarded rather than left to crash the whole server on an
+--echo # internal allocation failure. This is a regression check that ordinary
+--echo # aggregation through that guarded path still returns the correct value.
+--echo #
+CREATE TABLE t_agg_narrow (c `cube`(3) NOT NULL);
+INSERT INTO t_agg_narrow VALUES ('(1, 2, 3)');
+INSERT INTO t_agg_narrow VALUES ('(4, 5, 6)');
+SELECT cube_to_string(cube_agg(c)) FROM t_agg_narrow;
+DROP TABLE t_agg_narrow;
+CREATE TABLE t_scalar_agg_guard (x DOUBLE NOT NULL);
+INSERT INTO t_scalar_agg_guard VALUES (1.0), (5.0);
+SELECT cube_scalar_agg(x) FROM t_scalar_agg_guard;
+DROP TABLE t_scalar_agg_guard;
+
+--echo #
 --echo # Cleanup
 --echo #
 
