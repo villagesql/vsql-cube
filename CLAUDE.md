@@ -135,8 +135,9 @@ limitation in practice.
 
 ### NaN and Inf are rejected
 
-`parse_double`, `cube_point_nd_impl`, and the `cube_box_nd_impl` CSV parser all call
-`std::isfinite()` after `strtod` and return an error for NaN or Inf inputs. The type encode
+`parse_double` and `parse_coord_csv` both call `std::isfinite()` after `strtod`, and
+`gather_coords` checks it again for a coordinate that arrives as a number, so NaN and
+Inf are rejected on every path into a cube. The type encode
 path (`cube_encode → cube_parse → parse_double`) inherits this rejection. Direct REAL inputs
 to `cube_point` and `cube_box` are passed through from the server and are not checked — users
 who need to guard against NaN in those paths should validate at the application layer.
@@ -216,6 +217,6 @@ See README.md → Known Limitations for the full list. The main constraints:
 
 - **L1**: Per-row variable-length storage not supported — `cube(n)` always uses `8+2n*8` bytes regardless of actual ndim. Choose n to match your data. The remaining limitation is per-row compaction (e.g., 3-dim cube in cube(10) column still uses 168 bytes, not 56).
 - **L2**: No custom operator syntax (`&&`, `@>`, etc.) — named functions only
-- **L3**: No array input type — CSV strings used instead
+- **L3**: No array input type — the constructors take the coordinates as separate arguments instead. A single argument may still be a comma-separated string, which is the only way to build a cube from coordinates held in a column.
 - **L4**: No GiST indexing
 - **L5**: No `ALTER EXTENSION ... UPGRADE` — planned for a future VillageSQL release

@@ -35,6 +35,43 @@ SELECT cube_point_nd('1.0,2.0,3.0');
 SELECT cube_box_nd('1.0,2.0', '4.0,5.0');
 
 --echo #
+--echo # Constructors: coordinates as separate arguments
+--echo #
+
+SELECT cube_point_nd(1.0, 2.0, 3.0);
+SELECT cube_point_nd(7.5);
+SELECT cube_point_nd(1, 2, 3);
+SELECT cube_box_nd(1.0, 2.0, 4.0, 5.0);
+SELECT cube_box_nd(5.0, 1.0);
+
+# Both forms describe the same value — the two rows below must read alike.
+# They cannot be compared with = here: a VDF constructor returns the base cube
+# type with no parameters, so wrapping one in cube_to_string() fails.
+SELECT cube_point_nd(1.0, 2.0, 3.0), cube_point_nd('1.0,2.0,3.0');
+SELECT cube_box_nd(1.0, 2.0, 4.0, 5.0), cube_box_nd('1.0,2.0', '4.0,5.0');
+
+# Mixed: a string may carry several coordinates alongside single ones.
+SELECT cube_point_nd('1.0,2.0', 3.0);
+
+# A coordinate list held in a column can only travel as a string, which is why
+# the string form stays supported.
+SELECT cube_point_nd(coords) FROM (SELECT '4.0,5.0,6.0' AS coords) AS s;
+
+--echo #
+--echo # Constructors: argument-shape errors
+--echo #
+
+# An odd number of box coordinates has no lower/upper split.
+--error 3200
+SELECT cube_box_nd(1.0, 2.0, 3.0);
+# A cube argument is refused before any row is read, so this is an
+# initialization error rather than a per-row VDF error.
+--error ER_CANT_INITIALIZE_UDF
+SELECT cube_point_nd(cube_point(1.0));
+# NULL propagates rather than erroring.
+SELECT cube_point_nd(1.0, NULL, 3.0) IS NULL AS null_in_null_out;
+
+--echo #
 --echo # String conversion round-trip
 --echo #
 
@@ -85,6 +122,10 @@ SELECT cube_inter(a, b) FROM _tab WHERE id = 2;
 SELECT cube_enlarge(c, 1.0, 1) FROM _ta WHERE id = 4;
 SELECT cube_add_dim(c, 2.0, 6.0) FROM _ta WHERE id = 2;
 SELECT cube_subset(c, '1,3') FROM _ta WHERE id = 3;
+SELECT cube_subset(c, 1, 3) FROM _ta WHERE id = 3;
+# Out of range is caught in both call shapes.
+--error 3200
+SELECT cube_subset(c, 1, 99) FROM _ta WHERE id = 3;
 
 --echo #
 --echo # NULL handling
