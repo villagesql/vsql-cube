@@ -33,6 +33,46 @@ SELECT cube_box_nd('1.0,2.0', '4.0,5.0');
 cube_box_nd('1.0,2.0', '4.0,5.0')
 (1, 2),(4, 5)
 #
+# Constructors: coordinates as separate arguments
+#
+SELECT cube_point_nd(1.0, 2.0, 3.0);
+cube_point_nd(1.0, 2.0, 3.0)
+(1, 2, 3)
+SELECT cube_point_nd(7.5);
+cube_point_nd(7.5)
+(7.5)
+SELECT cube_point_nd(1, 2, 3);
+cube_point_nd(1, 2, 3)
+(1, 2, 3)
+SELECT cube_box_nd(1.0, 2.0, 4.0, 5.0);
+cube_box_nd(1.0, 2.0, 4.0, 5.0)
+(1, 2),(4, 5)
+SELECT cube_box_nd(5.0, 1.0);
+cube_box_nd(5.0, 1.0)
+(1),(5)
+SELECT cube_point_nd(1.0, 2.0, 3.0), cube_point_nd('1.0,2.0,3.0');
+cube_point_nd(1.0, 2.0, 3.0)	cube_point_nd('1.0,2.0,3.0')
+(1, 2, 3)	(1, 2, 3)
+SELECT cube_box_nd(1.0, 2.0, 4.0, 5.0), cube_box_nd('1.0,2.0', '4.0,5.0');
+cube_box_nd(1.0, 2.0, 4.0, 5.0)	cube_box_nd('1.0,2.0', '4.0,5.0')
+(1, 2),(4, 5)	(1, 2),(4, 5)
+SELECT cube_point_nd('1.0,2.0', 3.0);
+cube_point_nd('1.0,2.0', 3.0)
+(1, 2, 3)
+SELECT cube_point_nd(coords) FROM (SELECT '4.0,5.0,6.0' AS coords) AS s;
+cube_point_nd(coords)
+(4, 5, 6)
+#
+# Constructors: argument-shape errors
+#
+SELECT cube_box_nd(1.0, 2.0, 3.0);
+ERROR HY000: VDF error in function 'cube_box_nd': cube_box_nd: got 3 coordinates; a box needs an even number, half the lower corner and half the upper
+SELECT cube_point_nd(cube_point(1.0));
+ERROR HY000: Can't initialize function 'cube_point_nd'; cube_point_nd: argument 1 is a cube, not a coordinate
+SELECT cube_point_nd(1.0, NULL, 3.0) IS NULL AS null_in_null_out;
+null_in_null_out
+1
+#
 # String conversion round-trip
 #
 SELECT cube_from_string('(1, 2),(3, 4)');
@@ -128,6 +168,11 @@ cube_add_dim(c, 2.0, 6.0)
 SELECT cube_subset(c, '1,3') FROM _ta WHERE id = 3;
 cube_subset(c, '1,3')
 (1, 3),(4, 6)
+SELECT cube_subset(c, 1, 3) FROM _ta WHERE id = 3;
+cube_subset(c, 1, 3)
+(1, 3),(4, 6)
+SELECT cube_subset(c, 1, 99) FROM _ta WHERE id = 3;
+ERROR HY000: VDF error in function 'cube_subset': cube_subset: dim 99 out of range (1..3)
 #
 # NULL handling
 #
@@ -194,9 +239,9 @@ ERROR HY000: error encountered during cube_point_nd inference: cube_point_nd: no
 SELECT cube_point_nd('1.0,inf,3.0');
 ERROR HY000: error encountered during cube_point_nd inference: cube_point_nd: non-finite value 'inf'
 SELECT cube_box_nd('1,nan', '4,5');
-ERROR HY000: VDF error in function 'cube_box_nd': cube_box_nd: invalid lo coords
+ERROR HY000: VDF error in function 'cube_box_nd': cube_box_nd: non-finite value 'nan'
 SELECT cube_box_nd('1,2', '4,inf');
-ERROR HY000: VDF error in function 'cube_box_nd': cube_box_nd: invalid hi coords
+ERROR HY000: VDF error in function 'cube_box_nd': cube_box_nd: non-finite value 'inf'
 #
 # Determinism: cube functions usable in CHECK constraints
 #
@@ -228,7 +273,7 @@ cube_is_point(c)
 1
 DROP TABLE _tedge;
 SELECT cube_subset(c, '99999999999999999999') FROM _ta WHERE id = 5;
-ERROR HY000: VDF error in function 'cube_subset': cube_subset: dim token too long
+ERROR HY000: VDF error in function 'cube_subset': cube_subset: dim 1e+20 out of range (1..3)
 #
 # Parameterized type: cube(n)
 #

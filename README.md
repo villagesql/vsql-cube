@@ -114,15 +114,16 @@ Choose `n` to match your actual data. A `cube(3)` column uses 56 bytes per row i
 |----------|-----------|---------|
 | `cube_point` | `(x REAL)` | 1D point |
 | `cube_box` | `(lo REAL, hi REAL)` | 1D box |
-| `cube_point_nd` | `(coords_csv STRING)` | n-D point from CSV string |
-| `cube_box_nd` | `(lo_csv STRING, hi_csv STRING)` | n-D box from two CSV strings |
+| `cube_point_nd` | `(x, y, ...)` | n-D point from its coordinates |
+| `cube_box_nd` | `(lo..., hi...)` | n-D box, lower corner then upper |
 | `cube_add_dim` | `(c cube, lo REAL, hi REAL)` | cube with one more dimension appended |
 
 ```sql
 SELECT cube_point(5.0);                -- (5)
 SELECT cube_box(1.0, 3.0);            -- (1),(3)
-SELECT cube_point_nd('1,2,3');         -- (1, 2, 3)
-SELECT cube_box_nd('1,2,3', '4,5,6'); -- (1, 2, 3),(4, 5, 6)
+SELECT cube_point_nd(1, 2, 3);         -- (1, 2, 3)
+SELECT cube_box_nd(1, 2, 3, 4, 5, 6); -- (1, 2, 3),(4, 5, 6)
+SELECT cube_point_nd('1,2,3');         -- (1, 2, 3), same point
 
 -- cube_add_dim extends a stored cube with a new dimension
 CREATE TABLE t (c `cube`(32) NOT NULL);
@@ -220,7 +221,7 @@ DROP TABLE t;
 | `cube_union` | `(a, b cube)` | Smallest cube containing both |
 | `cube_inter` | `(a, b cube)` | Intersection of two cubes |
 | `cube_enlarge` | `(c cube, radius REAL, n_dims INT)` | Expand by radius along first n_dims dimensions |
-| `cube_subset` | `(c cube, dims_csv STRING)` | Extract and optionally reorder dimensions |
+| `cube_subset` | `(c cube, d1, d2, ...)` | Extract and optionally reorder dimensions, counting from 1 |
 
 ```sql
 CREATE TABLE t (a `cube`(3) NOT NULL, b `cube`(3) NOT NULL);
@@ -228,7 +229,7 @@ INSERT INTO t VALUES ('(1,1,1),(3,3,3)', '(2,2,2),(5,5,5)');
 SELECT cube_union(a, b) FROM t;          -- (1, 1, 1),(5, 5, 5)
 SELECT cube_inter(a, b) FROM t;          -- (2, 2, 2),(3, 3, 3)
 SELECT cube_enlarge(a, 1.0, 2) FROM t;  -- (0, 0, 1),(4, 4, 3)
-SELECT cube_subset(a, '3,1') FROM t;    -- (1, 1),(3, 3)
+SELECT cube_subset(a, 3, 1) FROM t;     -- (1, 1),(3, 3)
 DROP TABLE t;
 ```
 
@@ -332,15 +333,19 @@ VEF does not provide a custom operator registration API. PostgreSQL's cube opera
 
 ### L3: No Array Input Type Support
 
-**Impact:** Constructors accept CSV strings instead of arrays. The workaround is straightforward — `'1.0,2.0,3.0'` instead of `ARRAY[1.0,2.0,3.0]`. Code ported from PostgreSQL needs string-formatting substitution at the call site.
-
-VEF VDFs cannot accept array-typed parameters:
+**Impact:** small. VEF VDFs cannot accept an array-typed parameter, so the constructors take the coordinates as separate arguments instead. Code ported from PostgreSQL drops the `ARRAY[...]` wrapper at the call site.
 
 | PostgreSQL | vsql-cube |
 |------------|----------------|
-| `cube(ARRAY[1.0,2.0,3.0])` | `cube_point_nd('1.0,2.0,3.0')` |
-| `cube(ARRAY[1.0], ARRAY[3.0])` | `cube_box_nd('1.0', '3.0')` |
-| `cube_subset(c, ARRAY[2,1])` | `cube_subset(c, '2,1')` |
+| `cube(ARRAY[1.0,2.0,3.0])` | `cube_point_nd(1.0, 2.0, 3.0)` |
+| `cube(ARRAY[1.0], ARRAY[3.0])` | `cube_box_nd(1.0, 3.0)` |
+| `cube_subset(c, ARRAY[2,1])` | `cube_subset(c, 2, 1)` |
+
+Each argument may also be a comma-separated string, and the lists join end to
+end, so `cube_point_nd('1,2', 3)` is the same point as `cube_point_nd(1, 2, 3)`.
+Pass a string when the coordinates live in a column: separate arguments cannot
+express that, because SQL fixes the argument count when it parses the
+statement.
 
 ### L4: No GiST Indexing
 

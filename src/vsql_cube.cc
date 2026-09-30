@@ -700,66 +700,153 @@ void cube_box_impl(RealArg lo, RealArg hi, CustomResultWith<CubeParams> out) {
   }
 }
 
-// CUBE_POINT_ND(coords_csv STRING) → cube  (n-dim point from CSV)
-void cube_point_nd_impl(StringArg arg, CustomResultWith<CubeParams> out) {
-  try {
-    if (arg.is_null()) { out.set_null(); return; }
-    std::string_view sv = arg.value();
-    CubeData c;
-    memset(&c, 0, sizeof(c));
-    int n = 0;
-    size_t pos = 0;
-    while (pos <= sv.size()) {
-      size_t comma = sv.find(',', pos);
-      std::string_view tok = sv.substr(pos, comma == std::string_view::npos
-                                                ? std::string_view::npos
-                                                : comma - pos);
-      // Trim whitespace
-      size_t s = tok.find_first_not_of(" \t\r\n");
-      size_t e = tok.find_last_not_of(" \t\r\n");
-      if (s == std::string_view::npos) {
-        if (comma == std::string_view::npos) break;
-        pos = comma + 1;
-        continue;
-      }
-      tok = tok.substr(s, e - s + 1);
-      if (n >= kAbsoluteMaxDims) {
-        char msg[VEF_MAX_ERROR_LEN];
-        snprintf(msg, sizeof(msg),
-                 "cube_point_nd: exceeds maximum %d dimensions", kAbsoluteMaxDims);
-        out.error(msg);
-        return;
-      }
-      char tmp[64];
-      if (tok.size() >= sizeof(tmp)) {
-        out.error("cube_point_nd: token too long");
-        return;
-      }
-      memcpy(tmp, tok.data(), tok.size());
-      tmp[tok.size()] = '\0';
-      char *endptr;
-      double v = strtod(tmp, &endptr);
-      if (endptr != tmp + tok.size()) {
-        char msg[VEF_MAX_ERROR_LEN];
-        snprintf(msg, sizeof(msg), "cube_point_nd: invalid number '%s'", tmp);
-        out.error(msg);
-        return;
-      }
-      if (!std::isfinite(v)) {
-        char msg[VEF_MAX_ERROR_LEN];
-        snprintf(msg, sizeof(msg), "cube_point_nd: non-finite value '%s'", tmp);
-        out.error(msg);
-        return;
-      }
-      c.ll[n] = c.ur[n] = v;
-      n++;
+// Parses a comma-separated coordinate list into `o`, which must hold at least
+// kAbsoluteMaxDims doubles. Returns the count parsed, or -1 with `why` filled
+// in. Blank tokens are skipped, so "1, ,2" reads as two coordinates; a list
+// that yields nothing at all is an error.
+static int parse_coord_csv(std::string_view sv, double *o,
+                           char (&why)[VEF_MAX_ERROR_LEN]) {
+  int n = 0;
+  size_t pos = 0;
+  while (pos <= sv.size()) {
+    size_t comma = sv.find(',', pos);
+    std::string_view tok = sv.substr(pos, comma == std::string_view::npos
+                                              ? std::string_view::npos
+                                              : comma - pos);
+    size_t s = tok.find_first_not_of(" \t\r\n");
+    size_t e = tok.find_last_not_of(" \t\r\n");
+    if (s == std::string_view::npos) {
       if (comma == std::string_view::npos) break;
       pos = comma + 1;
+      continue;
     }
-    if (n == 0) {
-      out.error("cube_point_nd: no coordinates");
+    tok = tok.substr(s, e - s + 1);
+    if (n >= kAbsoluteMaxDims) {
+      snprintf(why, sizeof(why), "exceeds maximum %d dimensions",
+               kAbsoluteMaxDims);
+      return -1;
+    }
+    char tmp[64];
+    if (tok.size() >= sizeof(tmp)) {
+      snprintf(why, sizeof(why), "token too long");
+      return -1;
+    }
+    memcpy(tmp, tok.data(), tok.size());
+    tmp[tok.size()] = '\0';
+    char *endptr;
+    double v = strtod(tmp, &endptr);
+    if (endptr != tmp + tok.size()) {
+      snprintf(why, sizeof(why), "invalid number '%s'", tmp);
+      return -1;
+    }
+    if (!std::isfinite(v)) {  // reject NaN and Inf
+      snprintf(why, sizeof(why), "non-finite value '%s'", tmp);
+      return -1;
+    }
+    o[n++] = v;
+    if (comma == std::string_view::npos) break;
+    pos = comma + 1;
+  }
+  if (n == 0) {
+    snprintf(why, sizeof(why), "no coordinates");
+    return -1;
+  }
+  return n;
+}
+
+// Gathers the coordinates named by arguments `first` onward into `o`, which
+// must hold at least `max` doubles. Returns the count, -1 on a bad
+// value (with `why` filled in), or -2 when any argument is NULL.
+//
+// One rule covers both call shapes: a string argument holds a comma-separated
+// list, an int or real argument holds one coordinate, and the lists are laid
+// end to end. So cube_point_nd(1, 2, 3) and cube_point_nd('1,2,3') arrive at
+// the same three coordinates. Note that a SQL decimal literal such as 1.5
+// reaches a VDF as a string, not a real (the server maps DECIMAL_RESULT to
+// VEF_TYPE_STRING), which is why a string argument must never be read as a
+// number and a numeric-looking argument must never be assumed to be one.
+static int gather_coords(VarArgs args, size_t first, double *o, int max,
+                         char (&why)[VEF_MAX_ERROR_LEN]) {
+  int n = 0;
+  for (size_t i = first; i < args.size(); i++) {
+    AnyArg a = args[i];
+    if (a.is_null()) return -2;
+    if (a.is_str()) {
+      double part[kAbsoluteMaxDims];
+      int got = parse_coord_csv(a.as_str(), part, why);
+      if (got < 0) return -1;
+      if (n + got > max) {
+        snprintf(why, sizeof(why), "exceeds maximum %d coordinates", max);
+        return -1;
+      }
+      memcpy(o + n, part, static_cast<size_t>(got) * sizeof(double));
+      n += got;
+      continue;
+    }
+    if (n >= max) {
+      snprintf(why, sizeof(why), "exceeds maximum %d coordinates", max);
+      return -1;
+    }
+    double v = a.is_int() ? static_cast<double>(a.as_int()) : a.as_real();
+    if (!std::isfinite(v)) {
+      snprintf(why, sizeof(why), "non-finite value at argument %zu", i + 1);
+      return -1;
+    }
+    o[n++] = v;
+  }
+  if (n == 0) {
+    snprintf(why, sizeof(why), "no coordinates");
+    return -1;
+  }
+  return n;
+}
+
+// Rejects an argument that cannot name a coordinate. A custom type is the one
+// real mistake to catch here; everything else the server can present is either
+// a number or text that parse_coord_csv will judge at run time.
+static bool coord_args_are_sane(PrerunArgs args, size_t first,
+                                const char *func_name, PrerunResult out) {
+  if (args.size() <= first) {
+    char msg[VEF_MAX_ERROR_LEN];
+    snprintf(msg, sizeof(msg), "%s: needs at least one coordinate", func_name);
+    out.error(msg);
+    return false;
+  }
+  for (size_t i = first; i < args.size(); i++) {
+    if (args.type_at(i).is_custom()) {
+      char msg[VEF_MAX_ERROR_LEN];
+      snprintf(msg, sizeof(msg),
+               "%s: argument %zu is a %.*s, not a coordinate", func_name, i + 1,
+               static_cast<int>(args.type_at(i).custom_type().size()),
+               args.type_at(i).custom_type().data());
+      out.error(msg);
+      return false;
+    }
+  }
+  return true;
+}
+
+// CUBE_POINT_ND(x, y, ...) → cube. Each argument names one coordinate, or a
+// comma-separated list of them, so CUBE_POINT_ND('1,2,3') and
+// CUBE_POINT_ND(1, 2, 3) describe the same point.
+void cube_point_nd_prerun(PrerunArgs args, PrerunResult out) {
+  coord_args_are_sane(args, 0, "cube_point_nd", out);
+}
+
+void cube_point_nd_impl(VarArgs args, CustomResultWith<CubeParams> out) {
+  try {
+    CubeData c;
+    memset(&c, 0, sizeof(c));
+    char why[VEF_MAX_ERROR_LEN];
+    int n = gather_coords(args, 0, c.ll, kAbsoluteMaxDims, why);
+    if (n == -2) { out.set_null(); return; }
+    if (n < 0) {
+      char msg[VEF_MAX_ERROR_LEN];
+      snprintf(msg, sizeof(msg), "cube_point_nd: %s", why);
+      out.error(msg);
       return;
     }
+    memcpy(c.ur, c.ll, static_cast<size_t>(n) * sizeof(double));
     c.ndim = static_cast<uint16_t>(n);
     c.flags = kFlagIsPoint;
     set_cube_result_typed(c, out);
@@ -768,64 +855,47 @@ void cube_point_nd_impl(StringArg arg, CustomResultWith<CubeParams> out) {
   }
 }
 
-// CUBE_BOX_ND(lo_csv STRING, hi_csv STRING) → cube
-void cube_box_nd_impl(StringArg lo_arg, StringArg hi_arg,
-                      CustomResultWith<CubeParams> out) {
+// CUBE_BOX_ND(lo..., hi...) → cube. The coordinates from every argument are
+// read in order; the first half is the lower corner and the second half the
+// upper one, so the total must be even. CUBE_BOX_ND('1,2', '4,5') and
+// CUBE_BOX_ND(1, 2, 4, 5) describe the same box.
+void cube_box_nd_prerun(PrerunArgs args, PrerunResult out) {
+  coord_args_are_sane(args, 0, "cube_box_nd", out);
+}
+
+void cube_box_nd_impl(VarArgs args, CustomResultWith<CubeParams> out) {
   try {
-    if (lo_arg.is_null() || hi_arg.is_null()) { out.set_null(); return; }
-
-    auto parse_csv = [&](std::string_view sv, double *o, int *n_out) -> bool {
-      int n = 0;
-      size_t pos = 0;
-      while (pos <= sv.size()) {
-        size_t comma = sv.find(',', pos);
-        std::string_view tok = sv.substr(pos, comma == std::string_view::npos
-                                                  ? std::string_view::npos
-                                                  : comma - pos);
-        size_t s = tok.find_first_not_of(" \t\r\n");
-        size_t e = tok.find_last_not_of(" \t\r\n");
-        if (s == std::string_view::npos) {
-          if (comma == std::string_view::npos) break;
-          pos = comma + 1;
-          continue;
-        }
-        tok = tok.substr(s, e - s + 1);
-        if (n >= kAbsoluteMaxDims) return false;
-        char tmp[64];
-        if (tok.size() >= sizeof(tmp)) return false;
-        memcpy(tmp, tok.data(), tok.size());
-        tmp[tok.size()] = '\0';
-        char *endptr;
-        double v = strtod(tmp, &endptr);
-        if (endptr != tmp + tok.size()) return false;
-        if (!std::isfinite(v)) return false;  // reject NaN and Inf
-        o[n++] = v;
-        if (comma == std::string_view::npos) break;
-        pos = comma + 1;
-      }
-      *n_out = n;
-      return n > 0;
-    };
-
     CubeData c;
     memset(&c, 0, sizeof(c));
-    int n_lo = 0, n_hi = 0;
-    if (!parse_csv(lo_arg.value(), c.ll, &n_lo)) {
-      out.error("cube_box_nd: invalid lo coords");
-      return;
-    }
-    if (!parse_csv(hi_arg.value(), c.ur, &n_hi)) {
-      out.error("cube_box_nd: invalid hi coords");
-      return;
-    }
-    if (n_lo != n_hi) {
+    char why[VEF_MAX_ERROR_LEN];
+    double all[kAbsoluteMaxDims * 2];
+    int n = gather_coords(args, 0, all, kAbsoluteMaxDims * 2, why);
+    if (n == -2) { out.set_null(); return; }
+    if (n < 0) {
       char msg[VEF_MAX_ERROR_LEN];
-      snprintf(msg, sizeof(msg),
-               "cube_box_nd: lo has %d dims, hi has %d dims", n_lo, n_hi);
+      snprintf(msg, sizeof(msg), "cube_box_nd: %s", why);
       out.error(msg);
       return;
     }
-    c.ndim = static_cast<uint16_t>(n_lo);
+    if (n % 2 != 0) {
+      char msg[VEF_MAX_ERROR_LEN];
+      snprintf(msg, sizeof(msg),
+               "cube_box_nd: got %d coordinates; a box needs an even number, "
+               "half the lower corner and half the upper", n);
+      out.error(msg);
+      return;
+    }
+    int half = n / 2;
+    if (half > kAbsoluteMaxDims) {
+      char msg[VEF_MAX_ERROR_LEN];
+      snprintf(msg, sizeof(msg), "cube_box_nd: exceeds maximum %d dimensions",
+               kAbsoluteMaxDims);
+      out.error(msg);
+      return;
+    }
+    memcpy(c.ll, all, static_cast<size_t>(half) * sizeof(double));
+    memcpy(c.ur, all + half, static_cast<size_t>(half) * sizeof(double));
+    c.ndim = static_cast<uint16_t>(half);
     cube_normalize(&c);
     set_cube_result_typed(c, out);
   } catch (...) {
@@ -1267,13 +1337,20 @@ void cube_enlarge_impl(CustomArg c_arg, RealArg r_arg, IntArg n_arg,
   }
 }
 
-// CUBE_SUBSET(c cube, dims_csv STRING) → cube
-// dims_csv: comma-separated 1-indexed dimension numbers
-void cube_subset_impl(CustomArg c_arg, StringArg dims_arg,
-                      CustomResultWith<CubeParams> out) {
+// CUBE_SUBSET(c cube, d1, d2, ...) → cube, or CUBE_SUBSET(c, dims_csv) → cube.
+// Dimension numbers are 1-indexed in both forms.
+void cube_subset_prerun(PrerunArgs args, PrerunResult out) {
+  if (args.size() < 2 || !args.type_at(0).is_custom()) {
+    out.error("cube_subset: needs a cube and at least one dimension number");
+    return;
+  }
+  coord_args_are_sane(args, 1, "cube_subset", out);
+}
+
+void cube_subset_impl(VarArgs args, CustomResultWith<CubeParams> out) {
   try {
-    if (c_arg.is_null() || dims_arg.is_null()) { out.set_null(); return; }
-    auto span = c_arg.value();
+    if (args[0].is_null()) { out.set_null(); return; }
+    auto span = args[0].as_custom();
     int n_slots = cube_n_slots(span.size());
     if (n_slots < 0) {
       out.error("cube_subset: invalid input");
@@ -1282,49 +1359,31 @@ void cube_subset_impl(CustomArg c_arg, StringArg dims_arg,
     CubeData c;
     cube_from_buf(span.data(), n_slots, &c);
 
-    // Parse dimension list
-    int dims[kAbsoluteMaxDims];
-    int n_dims = 0;
-    std::string_view sv = dims_arg.value();
-    size_t pos = 0;
-    while (pos <= sv.size()) {
-      size_t comma = sv.find(',', pos);
-      std::string_view tok = sv.substr(pos, comma == std::string_view::npos
-                                                ? std::string_view::npos
-                                                : comma - pos);
-      size_t s = tok.find_first_not_of(" \t\r\n");
-      if (s != std::string_view::npos) {
-        size_t e = tok.find_last_not_of(" \t\r\n");
-        tok = tok.substr(s, e - s + 1);
-        char tmp[16];
-        if (tok.size() >= sizeof(tmp)) {
-          out.error("cube_subset: dim token too long");
-          return;
-        }
-        memcpy(tmp, tok.data(), tok.size());
-        tmp[tok.size()] = '\0';
-        char *endptr;
-        errno = 0;
-        long dim = strtol(tmp, &endptr, 10);
-        if (errno == ERANGE || endptr != tmp + tok.size() || dim < 1 || dim > c.ndim) {
-          char msg[VEF_MAX_ERROR_LEN];
-          snprintf(msg, sizeof(msg),
-                   "cube_subset: dim %ld out of range (1..%d)", dim, c.ndim);
-          out.error(msg);
-          return;
-        }
-        if (n_dims >= kAbsoluteMaxDims) {
-          out.error("cube_subset: too many dims in list");
-          return;
-        }
-        dims[n_dims++] = static_cast<int>(dim - 1);  // convert to 0-indexed
-      }
-      if (comma == std::string_view::npos) break;
-      pos = comma + 1;
-    }
-    if (n_dims == 0) {
-      out.error("cube_subset: empty dim list");
+    // The dimension numbers arrive the same way coordinates do — one per
+    // argument, or several in a comma-separated string — so the same gather
+    // reads both shapes. They are 1-indexed and must be whole numbers.
+    char why[VEF_MAX_ERROR_LEN];
+    double requested[kAbsoluteMaxDims];
+    int n_dims = gather_coords(args, 1, requested, kAbsoluteMaxDims, why);
+    if (n_dims == -2) { out.set_null(); return; }
+    if (n_dims < 0) {
+      char msg[VEF_MAX_ERROR_LEN];
+      snprintf(msg, sizeof(msg), "cube_subset: %s", why);
+      out.error(msg);
       return;
+    }
+
+    int dims[kAbsoluteMaxDims];
+    for (int i = 0; i < n_dims; i++) {
+      double d = requested[i];
+      if (d != std::floor(d) || d < 1.0 || d > static_cast<double>(c.ndim)) {
+        char msg[VEF_MAX_ERROR_LEN];
+        snprintf(msg, sizeof(msg), "cube_subset: dim %g out of range (1..%d)",
+                 d, c.ndim);
+        out.error(msg);
+        return;
+      }
+      dims[i] = static_cast<int>(d) - 1;  // convert to 0-indexed
     }
 
     CubeData result;
@@ -1487,14 +1546,15 @@ VEF_GENERATE_ENTRY_POINTS(
       .build())
     .func(make_func<&cube_point_nd_impl>("cube_point_nd")
       .returns(CUBE)
-      .param(STRING)
+      .varargs()
+      .prerun<&cube_point_nd_prerun>()
       .buffer_size(kMaxStorageSize)
       .deterministic()
       .build())
     .func(make_func<&cube_box_nd_impl>("cube_box_nd")
       .returns(CUBE)
-      .param(STRING)
-      .param(STRING)
+      .varargs()
+      .prerun<&cube_box_nd_prerun>()
       .buffer_size(kMaxStorageSize)
       .deterministic()
       .build())
@@ -1602,8 +1662,8 @@ VEF_GENERATE_ENTRY_POINTS(
       .build())
     .func(make_func<&cube_subset_impl>("cube_subset")
       .returns(CUBE)
-      .param(CUBE)
-      .param(STRING)
+      .varargs()
+      .prerun<&cube_subset_prerun>()
       .buffer_size(kMaxStorageSize)
       .deterministic()
       .build())
