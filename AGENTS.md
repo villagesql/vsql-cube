@@ -17,7 +17,8 @@ typed builder API. All implementation lives in a single source file: `src/vsql_c
 - **Source**: `src/vsql_cube.cc`
 - **Storage**: `8 + 2*n*8` bytes per value where n is the column's declared dimension parameter
   - `cube(n)` → `8 + 2*n*8` bytes (e.g., `cube(3)` = 56 bytes, `cube(32)` = 520 bytes)
-  - Bare `cube` = `cube(32)` = 520 bytes (kDefaultStorageSize)
+  - A column must declare a length. `` `cube` `` on its own is refused with
+    `Type 'vsql_cube.cube' requires a length specification`
   - Maximum: `cube(100)` = 1608 bytes (kMaxStorageSize)
 - **Max dimensions**: 100 absolute maximum (kAbsoluteMaxDims); default column width is 32 (kDefaultMaxDims)
 - **Protocol**: V3 stable (uses staged SDK via `VillageSQL_BUILD_DIR`; `VillageSQL_SOURCE_DIR` not required)
@@ -48,14 +49,15 @@ struct CubeData {
 };
 ```
 
-On disk, only `ndim` doubles are stored for ll and ur (plus zero-padding to fill the column's
-declared n slots). Serialization uses little-endian byte order for ndim.
+On disk a `cube(n)` column occupies `8 + 2*n*8` bytes per row whatever its actual ndim: ndim
+doubles each for ll and ur, zero-padded out to the declared n slots. Serialization uses
+little-endian byte order for ndim.
 
 ### Key constants
 
 ```cpp
 constexpr int    kAbsoluteMaxDims   = 100;   // compile-time ceiling (matches PostgreSQL)
-constexpr int    kDefaultMaxDims    = 32;    // default for bare cube
+constexpr int    kDefaultMaxDims    = 32;    // params fallback, not a usable bare column
 constexpr size_t kDefaultStorageSize = 520;  // 8 + 2*32*8, persisted_length fallback
 constexpr size_t kMaxStorageSize     = 1608; // 8 + 2*100*8, buffer_size for VDFs
 constexpr size_t kMaxDecodeLen       = 5200; // output buffer for cube_to_string

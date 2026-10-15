@@ -19,17 +19,10 @@ cd vsql_cube/
 mkdir build
 cd build
 
-# Linux
 cmake .. \
   -DVillageSQL_BUILD_DIR=$HOME/build/villagesql \
   -DVillageSQL_SOURCE_DIR=$HOME/code/villagesql-server
-make -j $(($(getconf _NPROCESSORS_ONLN) - 2))
-
-# macOS
-cmake .. \
-  -DVillageSQL_BUILD_DIR=~/build/villagesql \
-  -DVillageSQL_SOURCE_DIR=~/code/villagesql-server
-make -j $(($(sysctl -n hw.logicalcpu) - 2))
+make -j $(getconf _NPROCESSORS_ONLN)
 
 # Install the VEB
 make install
