@@ -841,9 +841,7 @@ void cube_point_nd_impl(VarArgs args, CustomResultWith<CubeParams> out) {
     int n = gather_coords(args, 0, c.ll, kAbsoluteMaxDims, why);
     if (n == -2) { out.set_null(); return; }
     if (n < 0) {
-      char msg[VEF_MAX_ERROR_LEN];
-      snprintf(msg, sizeof(msg), "cube_point_nd: %s", why);
-      out.error(msg);
+      out.error(std::string("cube_point_nd: ") + why);
       return;
     }
     memcpy(c.ur, c.ll, static_cast<size_t>(n) * sizeof(double));
@@ -872,9 +870,7 @@ void cube_box_nd_impl(VarArgs args, CustomResultWith<CubeParams> out) {
     int n = gather_coords(args, 0, all, kAbsoluteMaxDims * 2, why);
     if (n == -2) { out.set_null(); return; }
     if (n < 0) {
-      char msg[VEF_MAX_ERROR_LEN];
-      snprintf(msg, sizeof(msg), "cube_box_nd: %s", why);
-      out.error(msg);
+      out.error(std::string("cube_box_nd: ") + why);
       return;
     }
     if (n % 2 != 0) {
@@ -1367,9 +1363,7 @@ void cube_subset_impl(VarArgs args, CustomResultWith<CubeParams> out) {
     int n_dims = gather_coords(args, 1, requested, kAbsoluteMaxDims, why);
     if (n_dims == -2) { out.set_null(); return; }
     if (n_dims < 0) {
-      char msg[VEF_MAX_ERROR_LEN];
-      snprintf(msg, sizeof(msg), "cube_subset: %s", why);
-      out.error(msg);
+      out.error(std::string("cube_subset: ") + why);
       return;
     }
 
