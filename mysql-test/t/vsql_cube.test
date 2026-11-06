@@ -1,5 +1,5 @@
 # Setup: Copy VEB to veb_dir if VSQL_CUBE_VEB is set, then install extension
---let $veb_dest = `SELECT CONCAT(@@veb_dir, '/veb')`
+--let $veb_dest = `SELECT CONCAT(@@veb_dir, '/vsql_cube.veb')`
 if ($VSQL_CUBE_VEB) {
   --error 0,1
   --remove_file $veb_dest
