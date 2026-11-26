@@ -1,0 +1,69 @@
+SET PERSIST vsql_allow_preview_extensions = ON;
+INSTALL EXTENSION vsql_cube;
+CREATE TABLE t (id INT PRIMARY KEY, c `cube`(2) NOT NULL);
+CREATE INDEX idx_c ON t (c) USING EXTENDED(vsql_cube.rtree);
+INSERT INTO t VALUES
+(1, '(0,0)'),
+(2, '(3,4)'),
+(3, '(1,1),(2,2)'),
+(4, '(10,0)'),
+(5, '(-6,-8)'),
+(6, '(0,7),(1,9)');
+# Expected: 1, 3, 2
+SELECT id FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 3;
+id
+1
+3
+2
+# A table that is not opened between the restart and its DROP.
+CREATE TABLE tu LIKE t;
+INSERT INTO tu VALUES (1, '(1,1)');
+# restart
+# DROP opens the table from the data dictionary without its index context.
+DROP TABLE tu;
+# The same rows after the restart. Expected: 1, 3, 2
+SELECT id FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 3;
+id
+1
+3
+2
+# DML still reaches the index. Expected: 1, 7, 3
+INSERT INTO t VALUES (7, '(-0.1,0)');
+SELECT id FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 3;
+id
+1
+7
+3
+#
+# Crash with a transaction open. Recovery opens the table to resurrect the
+# transaction, then rolls it back through the index: the rolled-back
+# insert is removed and the rolled-back delete and move are unmarked.
+#
+INSERT INTO t VALUES (9, '(0,0.3)');
+BEGIN;
+INSERT INTO t VALUES (8, '(0.05,0)');
+UPDATE t SET c = '(70,70)' WHERE id = 1;
+DELETE FROM t WHERE id = 3;
+# Kill and restart
+# Wait for the background rollback of the recovered transaction
+# Expected: 1 (0), 7 (0.1), 9 (0.3), 3 (1.414214)
+SELECT id, ROUND(cube_distance(c, '(0,0)'), 6) AS d
+FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 4;
+id	d
+1	0
+7	0.1
+9	0.3
+3	1.414214
+# No entry is left behind for the rolled-back rows.
+DELETE FROM t WHERE id IN (1, 3);
+# Expected: 7 (0.1), 9 (0.3), 2 (5)
+SELECT id, ROUND(cube_distance(c, '(0,0)'), 6) AS d
+FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 3;
+id	d
+7	0.1
+9	0.3
+2	5
+DROP TABLE t;
+UNINSTALL EXTENSION vsql_cube;
+SET PERSIST vsql_allow_preview_extensions = OFF;
+RESET PERSIST vsql_allow_preview_extensions;

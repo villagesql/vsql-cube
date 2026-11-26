@@ -1,0 +1,360 @@
+SET PERSIST vsql_allow_preview_extensions = ON;
+INSTALL EXTENSION vsql_cube;
+#
+# Small table: points and boxes with known nearest neighbours
+#
+CREATE TABLE t (
+id INT PRIMARY KEY,
+c `cube`(2) NOT NULL
+);
+CREATE INDEX idx_c ON t (c) USING EXTENDED(vsql_cube.rtree);
+# Empty index
+SELECT id FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 3;
+id
+INSERT INTO t VALUES
+(1, '(0,0)'),
+(2, '(3,4)'),
+(3, '(1,1),(2,2)'),
+(4, '(10,0)'),
+(5, '(-6,-8)'),
+(6, '(0,7),(1,9)');
+# The KNN scan serves the query
+EXPLAIN FORMAT=TREE
+SELECT id FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 3;
+EXPLAIN
+-> Limit: 3 row(s)  (cost=COST rows=ROWS)
+    -> Index KNN scan on t using idx_c (c <-> '(0, 0)'), limit 3  (cost=COST rows=ROWS)
+
+# Expected: 1 (0), 3 (1.414214), 2 (5), 6 (7)
+SELECT id, ROUND(cube_distance(c, '(0,0)'), 6) AS d
+FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 4;
+id	d
+1	0
+3	1.414214
+2	5
+6	7
+# A query point inside a box is at distance 0 from it.
+# Expected: 3 (0), then 1 (2.12132)
+SELECT id, ROUND(cube_distance(c, '(1.5,1.5)'), 6) AS d
+FROM t ORDER BY cube_distance(c, '(1.5,1.5)') LIMIT 2;
+id	d
+3	0
+1	2.12132
+# A query with fewer dimensions than the column: the query's missing
+# dimension is 0. Expected: 3 (3.162278), 2 (4.472136)
+SELECT id, ROUND(cube_distance(c, '(5)'), 6) AS d
+FROM t ORDER BY cube_distance(c, '(5)') LIMIT 2;
+id	d
+3	3.162278
+2	4.472136
+# A box query. Expected: 3 (0), 2 (1), 1 (2.828427)
+SELECT id, ROUND(cube_distance(c, '(2,2),(3,3)'), 6) AS d
+FROM t ORDER BY cube_distance(c, '(2,2),(3,3)') LIMIT 3;
+id	d
+3	0
+2	1
+1	2.828427
+# The default profile does not serve the other metrics
+EXPLAIN FORMAT=TREE
+SELECT id FROM t ORDER BY cube_taxicab_distance(c, '(0,0)') LIMIT 3;
+EXPLAIN
+-> Limit: 3 row(s)  (cost=COST rows=ROWS)
+    -> Sort: vsql_cube.cube_taxicab_distance(t.c,'(0, 0)'), limit input to 3 row(s) per chunk  (cost=COST rows=ROWS)
+        -> Table scan on t  (cost=COST rows=ROWS)
+
+#
+# Taxicab and Chebyshev profiles
+#
+CREATE TABLE tm (
+id INT PRIMARY KEY,
+c `cube`(2) NOT NULL
+);
+CREATE INDEX idx_l1 ON tm (c cube_rtree_l1) USING EXTENDED(vsql_cube.rtree);
+CREATE INDEX idx_linf ON tm (c cube_rtree_linf) USING EXTENDED(vsql_cube.rtree);
+Warnings:
+Warning	1831	Duplicate index 'idx_linf' defined on the table 'test.tm'. This is deprecated and will be disallowed in a future release.
+INSERT INTO tm SELECT * FROM t;
+EXPLAIN FORMAT=TREE
+SELECT id FROM tm ORDER BY cube_taxicab_distance(c, '(0,0)') LIMIT 3;
+EXPLAIN
+-> Limit: 3 row(s)  (cost=COST rows=ROWS)
+    -> Index KNN scan on tm using idx_l1 (c <-> '(0, 0)'), limit 3  (cost=COST rows=ROWS)
+
+# Expected: 1 (0.1), 3 (1.9), 2 (6.9)
+SELECT id, ROUND(cube_taxicab_distance(c, '(0.1,0)'), 6) AS d
+FROM tm ORDER BY cube_taxicab_distance(c, '(0.1,0)') LIMIT 3;
+id	d
+1	0.1
+3	1.9
+2	6.9
+EXPLAIN FORMAT=TREE
+SELECT id FROM tm ORDER BY cube_chebyshev_distance(c, '(0,0)') LIMIT 3;
+EXPLAIN
+-> Limit: 3 row(s)  (cost=COST rows=ROWS)
+    -> Index KNN scan on tm using idx_linf (c <-> '(0, 0)'), limit 3  (cost=COST rows=ROWS)
+
+# Expected: 1 (0), 3 (1), 2 (4)
+SELECT id, ROUND(cube_chebyshev_distance(c, '(0,0)'), 6) AS d
+FROM tm ORDER BY cube_chebyshev_distance(c, '(0,0)') LIMIT 3;
+id	d
+1	0
+3	1
+2	4
+DROP TABLE tm;
+#
+# DML
+#
+# UPDATE moves a row; it must be found at its new place only.
+UPDATE t SET c = '(0.5,0)' WHERE id = 4;
+# Expected: 1 (0), 4 (0.5), 3 (1.414214)
+SELECT id, ROUND(cube_distance(c, '(0,0)'), 6) AS d
+FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 3;
+id	d
+1	0
+4	0.5
+3	1.414214
+DELETE FROM t WHERE id = 1;
+# Expected: 4 (0.5), 3 (1.414214), 2 (5)
+SELECT id, ROUND(cube_distance(c, '(0,0)'), 6) AS d
+FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 3;
+id	d
+4	0.5
+3	1.414214
+2	5
+# Rolled-back INSERT, UPDATE and DELETE leave the index as it was.
+BEGIN;
+INSERT INTO t VALUES (7, '(0.1,0.1)');
+UPDATE t SET c = '(50,50)' WHERE id = 4;
+DELETE FROM t WHERE id = 3;
+# Inside the transaction. Expected: 7 (0.141421), 2 (5)
+SELECT id, ROUND(cube_distance(c, '(0,0)'), 6) AS d
+FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 2;
+id	d
+7	0.141421
+2	5
+ROLLBACK;
+# Expected: 4 (0.5), 3 (1.414214), 2 (5)
+SELECT id, ROUND(cube_distance(c, '(0,0)'), 6) AS d
+FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 3;
+id	d
+4	0.5
+3	1.414214
+2	5
+# Delete and re-insert a row with the same value in one transaction.
+# The row has a delete-marked and a live entry; both outcomes must
+# leave exactly one visible entry.
+BEGIN;
+DELETE FROM t WHERE id = 3;
+INSERT INTO t VALUES (3, '(1,1),(2,2)');
+ROLLBACK;
+# Expected: 4, 3, 2
+SELECT id FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 3;
+id
+4
+3
+2
+BEGIN;
+DELETE FROM t WHERE id = 3;
+INSERT INTO t VALUES (3, '(1,1),(2,2)');
+COMMIT;
+# Expected: 4, 3, 2
+SELECT id FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 3;
+id
+4
+3
+2
+# Change a row away and back in one transaction.
+BEGIN;
+UPDATE t SET c = '(40,40)' WHERE id = 2;
+UPDATE t SET c = '(3,4)' WHERE id = 2;
+UPDATE t SET c = '(40,40)' WHERE id = 2;
+UPDATE t SET c = '(3,4)' WHERE id = 2;
+COMMIT;
+# Expected: 4, 3, 2
+SELECT id FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 3;
+id
+4
+3
+2
+#
+# Locking read
+#
+BEGIN;
+# Expected: 4, 3
+SELECT id FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 2 FOR UPDATE;
+id
+4
+3
+COMMIT;
+#
+# A locking read waits for a transaction that moved a row away and back
+# several times. Several index entries for that row then look current
+# to validate(); the row must still be returned once.
+#
+CREATE TABLE tl (id INT PRIMARY KEY, c `cube`(2) NOT NULL);
+CREATE INDEX idx_c ON tl (c) USING EXTENDED(vsql_cube.rtree);
+INSERT INTO tl VALUES (1, '(1,1)'), (2, '(2,2)'), (3, '(3,3)');
+BEGIN;
+UPDATE tl SET c = '(5,5)' WHERE id = 1;
+UPDATE tl SET c = '(1,1)' WHERE id = 1;
+UPDATE tl SET c = '(5,5)' WHERE id = 1;
+BEGIN;
+SELECT id FROM tl ORDER BY cube_distance(c, '(0,0)') LIMIT 10 FOR SHARE;
+COMMIT;
+# Expected: 2, 3, 1, each once
+id
+2
+3
+1
+COMMIT;
+DROP TABLE tl;
+#
+# MVCC: a snapshot keeps seeing the rows as they were
+#
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+UPDATE t SET c = '(90,90)' WHERE id = 4;
+INSERT INTO t VALUES (8, '(0.2,0)');
+DELETE FROM t WHERE id = 3;
+# Snapshot. Expected: 4 (0.5), 3 (1.414214), 2 (5)
+SELECT id, ROUND(cube_distance(c, '(0,0)'), 6) AS d
+FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 3;
+id	d
+4	0.5
+3	1.414214
+2	5
+COMMIT;
+# After the snapshot. Expected: 8 (0.2), 2 (5), 6 (7)
+SELECT id, ROUND(cube_distance(c, '(0,0)'), 6) AS d
+FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 3;
+id	d
+8	0.2
+2	5
+6	7
+DROP TABLE t;
+#
+# NULL values are not indexed
+#
+CREATE TABLE tn (id INT PRIMARY KEY, c `cube`(2));
+CREATE INDEX idx_c ON tn (c) USING EXTENDED(vsql_cube.rtree);
+INSERT INTO tn VALUES (1, '(1,1)'), (2, NULL), (3, '(2,2)');
+UPDATE tn SET c = NULL WHERE id = 3;
+UPDATE tn SET c = '(0,0)' WHERE id = 2;
+# Expected: 2, 1
+SELECT id FROM tn ORDER BY cube_distance(c, '(0,0)') LIMIT 5;
+id
+2
+1
+DROP TABLE tn;
+#
+# Rollback with several entries for one row marked by the same
+# transaction: undo must unmark the entry each step marked, so the row
+# keeps exactly one live entry.
+#
+CREATE TABLE tr (id INT PRIMARY KEY, c `cube`(2) NOT NULL);
+CREATE INDEX idx_c ON tr (c) USING EXTENDED(vsql_cube.rtree);
+INSERT INTO tr VALUES (1,'(1,1)'), (2,'(2,2)'), (3,'(3,3)'), (4,'(4,4)'),
+(5,'(5,5)');
+# Move a row away, back and away again, then roll back.
+BEGIN;
+UPDATE tr SET c = '(90,90)' WHERE id = 3;
+UPDATE tr SET c = '(3,3)' WHERE id = 3;
+UPDATE tr SET c = '(90,90)' WHERE id = 3;
+ROLLBACK;
+# Expected: 1, 2, 3, 4, 5, each once
+SELECT id FROM tr ORDER BY cube_distance(c, '(0,0)') LIMIT 100;
+id
+1
+2
+3
+4
+5
+# Delete a row, insert it again and move it, then roll back.
+BEGIN;
+DELETE FROM tr WHERE id = 4;
+INSERT INTO tr VALUES (4, '(4,4)');
+UPDATE tr SET c = '(90,90)' WHERE id = 4;
+ROLLBACK;
+# Expected: 1, 2, 3, 4, 5, each once
+SELECT id FROM tr ORDER BY cube_distance(c, '(0,0)') LIMIT 100;
+id
+1
+2
+3
+4
+5
+# Deleted rows must not come back through a leftover entry.
+DELETE FROM tr WHERE id IN (3, 4);
+# Expected: 1 (1, 1), 2 (2, 2), 5 (5, 5)
+SELECT id, cube_to_string(c) AS c FROM tr
+ORDER BY cube_distance(c, '(0,0)') LIMIT 100;
+id	c
+1	(1, 1)
+2	(2, 2)
+5	(5, 5)
+DROP TABLE tr;
+#
+# Large table: many tree levels. The index scan must return the same
+# rows as a full scan.
+#
+# cube(100) entries are wide, so pages hold few of them and the tree
+# gets several levels.
+CREATE TABLE big (
+id INT PRIMARY KEY,
+c `cube`(100) NOT NULL
+);
+CREATE INDEX idx_c ON big (c) USING EXTENDED(vsql_cube.rtree);
+SELECT COUNT(*) FROM big;
+COUNT(*)
+2000
+EXPLAIN FORMAT=TREE
+SELECT id FROM big ORDER BY cube_distance(c, '(500,500)') LIMIT 10;
+EXPLAIN
+-> Limit: 10 row(s)  (cost=COST rows=ROWS)
+    -> Index KNN scan on big using idx_c (c <-> '(500, 500)'), limit 10  (cost=COST rows=ROWS)
+
+SELECT COUNT(*) = 10 AS same FROM (SELECT id FROM big ORDER BY cube_distance(c, '(500,500)') LIMIT 10) a JOIN (SELECT id FROM big IGNORE INDEX (idx_c) ORDER BY cube_distance(c, '(500,500)') LIMIT 10) b USING (id);
+same
+1
+# More rows than the first batch, and a WHERE filter that makes the
+# limit inexact, so the scan fetches further batches.
+# Expected: 1 (both counts 300)
+SELECT COUNT(*) = 300 AS same FROM
+(SELECT id FROM big ORDER BY cube_distance(c, '(10,990)') LIMIT 300) a
+JOIN
+(SELECT id FROM big IGNORE INDEX (idx_c)
+ORDER BY cube_distance(c, '(10,990)') LIMIT 300) b USING (id);
+same
+1
+SELECT COUNT(*) = 20 AS same FROM
+(SELECT id FROM big WHERE MOD(id, 7) = 0
+ORDER BY cube_distance(c, '(700,100)') LIMIT 20) a
+JOIN
+(SELECT id FROM big IGNORE INDEX (idx_c) WHERE MOD(id, 7) = 0
+ORDER BY cube_distance(c, '(700,100)') LIMIT 20) b USING (id);
+same
+1
+# Rows in distance order from the index scan. Expected: d is
+# non-decreasing.
+SELECT id, ROUND(cube_distance(c, '(250,750)'), 4) AS d
+FROM big ORDER BY cube_distance(c, '(250,750)') LIMIT 8;
+id	d
+737	3.1005
+150	11.4149
+1924	11.7076
+1324	14.6274
+1337	16.2518
+137	22.348
+750	26.762
+1911	27.2642
+# After deleting half the rows and moving some of the rest.
+DELETE FROM big WHERE MOD(id, 2) = 0;
+SELECT COUNT(*) FROM big;
+COUNT(*)
+1000
+SELECT COUNT(*) = 10 AS same FROM (SELECT id FROM big ORDER BY cube_distance(c, '(500,500)') LIMIT 10) a JOIN (SELECT id FROM big IGNORE INDEX (idx_c) ORDER BY cube_distance(c, '(500,500)') LIMIT 10) b USING (id);
+same
+1
+DROP TABLE big;
+UNINSTALL EXTENSION vsql_cube;
+SET PERSIST vsql_allow_preview_extensions = OFF;
+RESET PERSIST vsql_allow_preview_extensions;

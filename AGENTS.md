@@ -8,7 +8,8 @@ This file provides guidance to AI coding assistants when working with the vsql_c
 
 vsql_cube is a VillageSQL extension implementing the `cube` custom type — an n-dimensional box/point
 representation compatible with PostgreSQL's cube extension. It uses the Protocol V5 stable SDK and the
-typed builder API. All implementation lives in a single source file: `src/vsql_cube.cc`.
+typed builder API. The type and its functions live in `src/vsql_cube.cc`; the optional R-tree index
+lives in `src/cube_rtree.{h,cc}` (see "R-tree index" below).
 
 ## Key Facts
 
@@ -22,6 +23,35 @@ typed builder API. All implementation lives in a single source file: `src/vsql_c
   - Maximum: `cube(100)` = 1608 bytes (kMaxStorageSize)
 - **Max dimensions**: 100 absolute maximum (kAbsoluteMaxDims); default column width is 32 (kDefaultMaxDims)
 - **Protocol**: V5 stable (uses staged SDK via `VillageSQL_BUILD_DIR`; `VillageSQL_SOURCE_DIR` not required)
+
+## R-tree index
+
+- Built only with `-DVSQL_CUBE_RTREE=ON`, which compiles `src/cube_rtree.cc` and defines
+  `VSQL_CUBE_RTREE`. It uses the preview index and storage capabilities, so that build installs
+  only with `vsql_allow_preview_extensions = ON`; the default build registers no preview
+  capability. The option also sets `VSQL_USE_DEV_ABI`, since only the SDK's `include-dev/` headers
+  carry the current preview index ABI (the stable `include/` copy lacks `scan_validate` and the
+  read view).
+- Index type `rtree`, profiles `cube_rtree_l2` (default), `cube_rtree_l1`, `cube_rtree_linf`, one
+  per distance function. The server passes the profile's ORDER function id to the scan, so one
+  profile cannot serve several metrics.
+- `HAS_ROW_REF` only: no mapping B-tree, leaf entries hold the cube, the primary key and the
+  inserting and deleting trx ids. purge() serves both rollback of an insert (trx still active) and
+  purge of a delete mark (trx committed); the trx state picks the entry.
+- One `std::shared_mutex` per index (DML exclusive, scans shared). Every page access runs in its own
+  mini-transaction; scans ignore the server's mctx and hold no latch between calls.
+- KNN scans are exact best-first searches in batches; each refill restarts at the root and resumes
+  after the last result returned.
+- Test: `mysql-test/t/cube_rtree.test`. Both tests tell the builds apart by installing with preview
+  extensions off: only the R-tree build fails (error 3219). `cube_rtree` skips on the default
+  build; `vsql_cube` turns preview on for the R-tree build and gives the same result for both.
+- The server cannot yet build a custom index over existing rows (CREATE INDEX on a populated table,
+  ALTER ADD INDEX, table rebuild): with no mapping B-tree the DDL loader asserts on the missing root
+  page. `cube_rtree` creates every index on an empty table; `cube_rtree_build` pins the build cases
+  and is marked `not_implemented.inc` (empty `.result`).
+- Reopening a table with the index from the data dictionary (always after a restart) asserts in a
+  debug server without a fix to `Custom_index::load_storage` (it checked the root page while it was
+  still the placeholder 0 from `dd_fill_one_dict_index`). `cube_rtree_restart` needs that fix.
 
 ## Build
 

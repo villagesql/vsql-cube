@@ -289,9 +289,53 @@ SELECT COUNT(DISTINCT c) FROM t;
 -- 2
 ```
 
+### R-tree Index (preview)
+
+An R-tree index makes nearest-neighbour queries read only the part of the
+table near the query, instead of every row. It returns exact results, in the
+same order as the distance function.
+
+The index uses VillageSQL's preview index and storage capabilities, so it is
+built only on request, and an extension built with it installs only when
+preview extensions are allowed:
+
+```bash
+cmake .. -DVillageSQL_BUILD_DIR=/path/to/villagesql/build -DVSQL_CUBE_RTREE=ON
+```
+
+```sql
+SET PERSIST vsql_allow_preview_extensions = ON;
+INSTALL EXTENSION vsql_cube;
+
+CREATE TABLE t (id INT PRIMARY KEY, c `cube`(3) NOT NULL);
+CREATE INDEX idx_c ON t (c) USING EXTENDED(vsql_cube.rtree);
+
+SELECT id FROM t ORDER BY cube_distance(c, '(1,2,3)') LIMIT 10;
+```
+
+Each index serves one distance function, chosen by the profile named after the
+column (the default is `cube_rtree_l2`):
+
+| Profile | Serves |
+|---------|--------|
+| `cube_rtree_l2` | `ORDER BY cube_distance(c, q) LIMIT k` |
+| `cube_rtree_l1` | `ORDER BY cube_taxicab_distance(c, q) LIMIT k` |
+| `cube_rtree_linf` | `ORDER BY cube_chebyshev_distance(c, q) LIMIT k` |
+
+```sql
+CREATE INDEX idx_l1 ON t (c cube_rtree_l1) USING EXTENDED(vsql_cube.rtree);
+```
+
+The query must order by the distance function alone, ascending, with a
+`LIMIT`. Rows whose cube is NULL are not in the index, so an index scan does not
+return them.
+
 ## Testing
 
 See [TESTING.md](TESTING.md) for build, install, and test-run instructions.
+The R-tree test, `cube_rtree`, runs only against an extension built with
+`-DVSQL_CUBE_RTREE=ON` and is skipped otherwise. `vsql_cube` runs against
+either build.
 
 ## Known Limitations
 
@@ -334,9 +378,11 @@ Pass a string when the coordinates live in a column: separate arguments cannot
 express that, because SQL fixes the argument count when it parses the
 statement.
 
-### L4: No GiST Indexing
+### L4: Index Covers Nearest-Neighbour Queries Only
 
-**Impact:** Cube columns can't be indexed. Range queries and nearest-neighbor lookups (`ORDER BY cube_distance(...) LIMIT k`) require a full scan. For small tables or infrequent queries this is fine. For large tables with frequent spatial queries, this is a constraint.
+**Impact:** The [R-tree index](#r-tree-index-preview) serves `ORDER BY <distance>(c, q) LIMIT k`. Range and containment queries (`WHERE cube_contains(c, q)`, `cube_overlaps`, `cube_contained_by`) still read every row, and so does a nearest-neighbour query without the index or on a build without `-DVSQL_CUBE_RTREE=ON`.
+
+**What VEF would need:** The optimizer to use index profile functions of kind RESTRICT in `WHERE` conditions. The index ABI already declares the kind; the server does not use it yet.
 
 ## Troubleshooting
 

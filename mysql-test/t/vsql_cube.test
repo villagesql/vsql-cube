@@ -5,7 +5,21 @@ if ($VSQL_CUBE_VEB) {
   --remove_file $veb_dest
   --copy_file $VSQL_CUBE_VEB $veb_dest
 }
+# A build with -DVSQL_CUBE_RTREE=ON uses preview capabilities and installs only
+# with vsql_allow_preview_extensions ON (error 3219 otherwise). Allow them for
+# such a build; the result is the same for both builds.
+--echo INSTALL EXTENSION vsql_cube;
+--disable_query_log
+# The probe's failed INSTALL is logged as an error.
+call mtr.add_suppression("Failed to load VEF extension 'vsql_cube': extension requires preview capabilities");
+--error 0,3219
 INSTALL EXTENSION vsql_cube;
+--let $vsql_cube_preview = $mysql_errno
+if ($vsql_cube_preview) {
+  SET PERSIST vsql_allow_preview_extensions = ON;
+  INSTALL EXTENSION vsql_cube;
+}
+--enable_query_log
 
 CREATE TABLE _ta (id INT, c `cube`(32) NOT NULL);
 INSERT INTO _ta VALUES
@@ -511,9 +525,49 @@ SELECT cube_scalar_agg(x) FROM t_scalar_agg_guard;
 DROP TABLE t_scalar_agg_guard;
 
 --echo #
+--echo # Non-finite coordinates
+--echo #
+
+# A literal passed straight to a function has no column type to resolve
+# cube(n) from, so these go through a cube(1) column.
+CREATE TABLE _tinf (id INT PRIMARY KEY, c `cube`(1) NOT NULL);
+
+# Input parsing rejects NaN and infinity.
+--error 1366
+INSERT INTO _tinf VALUES (0, '(inf)');
+--error 1366
+INSERT INTO _tinf VALUES (0, '(nan)');
+
+INSERT INTO _tinf VALUES (1, '(1.7e308)'), (2, '(1e308)');
+
+# Arithmetic that overflows is an error, not an infinite coordinate: growing
+# past DBL_MAX, and shrinking past the midpoint where (lo + hi) / 2 overflows.
+--error 3200
+SELECT cube_enlarge(c, 1.7e308, 1) FROM _tinf WHERE id = 1;
+--error 3200
+SELECT cube_enlarge(c, -1e308, 1) FROM _tinf WHERE id = 1;
+# The largest finite results are still accepted.
+SELECT cube_to_string(cube_enlarge(c, 7e307, 1)) FROM _tinf WHERE id = 2;
+
+# An overflowed result cannot reach a table.
+--error 3200
+UPDATE _tinf SET c = cube_enlarge(c, 1.7e308, 1) WHERE id = 1;
+--error 3200
+CREATE TABLE _tinf2 AS SELECT cube_enlarge(c, 1.7e308, 1) AS c FROM _tinf
+  WHERE id = 1;
+SELECT id, cube_to_string(c) FROM _tinf ORDER BY id;
+DROP TABLE _tinf;
+
+--echo #
 --echo # Cleanup
 --echo #
 
 DROP TABLE _ta, _tab;
 
 UNINSTALL EXTENSION vsql_cube;
+if ($vsql_cube_preview) {
+  --disable_query_log
+  SET PERSIST vsql_allow_preview_extensions = OFF;
+  RESET PERSIST vsql_allow_preview_extensions;
+  --enable_query_log
+}

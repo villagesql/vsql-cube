@@ -1,0 +1,72 @@
+# R-tree index built over existing rows: CREATE INDEX on a populated table,
+# ALTER TABLE ... ADD INDEX, and a table rebuild that rebuilds the index. Each
+# must index every row, so a KNN scan returns the same rows as a full scan.
+#
+# The server cannot build a custom index over existing rows yet: the DDL
+# loader builds a B-tree for the index, and an index without a mapping B-tree
+# (HAS_ROW_REF only, as this one) has no root page, so the server asserts in
+# buf_page_init_low (page_no != UINT32_UNDEFINED) under Btree_load::build.
+--source include/villagesql/not_implemented.inc
+
+--let $veb_dest = `SELECT CONCAT(@@veb_dir, '/vsql_cube.veb')`
+if ($VSQL_CUBE_VEB) {
+  --error 0,1
+  --remove_file $veb_dest
+  --copy_file $VSQL_CUBE_VEB $veb_dest
+}
+
+# Only a build with the R-tree uses preview capabilities, so only such a build
+# fails to install while preview extensions are off (error 3219).
+--disable_query_log
+# The probe's failed INSTALL is logged as an error.
+call mtr.add_suppression("Failed to load VEF extension 'vsql_cube': extension requires preview capabilities");
+--error 0,3219
+INSTALL EXTENSION vsql_cube;
+if (!$mysql_errno) {
+  UNINSTALL EXTENSION vsql_cube;
+  --skip Needs vsql_cube built with -DVSQL_CUBE_RTREE=ON
+}
+--enable_query_log
+
+SET PERSIST vsql_allow_preview_extensions = ON;
+INSTALL EXTENSION vsql_cube;
+
+CREATE TABLE big (
+  id INT PRIMARY KEY,
+  c `cube`(100) NOT NULL
+);
+# The cube type converts only literals implicitly, so each value is computed
+# first and inserted as a literal.
+--disable_query_log
+--let $i = 1
+while ($i <= 2000) {
+  --let $v = `SELECT CONCAT('(', MOD($i * 7919, 1009) + $i / 10000, ',', MOD($i * 104729, 1013) + $i / 30000, ')')`
+  --eval INSERT INTO big VALUES ($i, '$v')
+  --inc $i
+}
+--enable_query_log
+SELECT COUNT(*) FROM big;
+
+--echo # CREATE INDEX on a populated table
+CREATE INDEX idx_c ON big (c) USING EXTENDED(vsql_cube.rtree);
+--replace_regex /\(cost=[0-9.e+-]+ rows=[0-9.e+-]+\)/(cost=COST rows=ROWS)/
+EXPLAIN FORMAT=TREE
+SELECT id FROM big ORDER BY cube_distance(c, '(500,500)') LIMIT 10;
+--let $q = (500,500)
+--eval SELECT COUNT(*) = 10 AS same FROM (SELECT id FROM big ORDER BY cube_distance(c, '$q') LIMIT 10) a JOIN (SELECT id FROM big IGNORE INDEX (idx_c) ORDER BY cube_distance(c, '$q') LIMIT 10) b USING (id)
+
+--echo # A table rebuild rebuilds the index from the rows
+ALTER TABLE big FORCE;
+--let $q = (123,456)
+--eval SELECT COUNT(*) = 10 AS same FROM (SELECT id FROM big ORDER BY cube_distance(c, '$q') LIMIT 10) a JOIN (SELECT id FROM big IGNORE INDEX (idx_c) ORDER BY cube_distance(c, '$q') LIMIT 10) b USING (id)
+
+--echo # ALTER TABLE ... ADD INDEX with another profile
+ALTER TABLE big ADD INDEX idx_l1 (c cube_rtree_l1) USING EXTENDED(vsql_cube.rtree);
+--let $q = (900,50)
+--eval SELECT COUNT(*) = 10 AS same FROM (SELECT id FROM big ORDER BY cube_taxicab_distance(c, '$q') LIMIT 10) a JOIN (SELECT id FROM big IGNORE INDEX (idx_l1) ORDER BY cube_taxicab_distance(c, '$q') LIMIT 10) b USING (id)
+
+DROP TABLE big;
+
+UNINSTALL EXTENSION vsql_cube;
+SET PERSIST vsql_allow_preview_extensions = OFF;
+RESET PERSIST vsql_allow_preview_extensions;

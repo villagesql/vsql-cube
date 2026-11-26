@@ -29,6 +29,15 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Extension name
 set(EXTENSION_NAME "vsql_cube")
 
+# The R-tree index uses the preview index and storage capabilities, so an
+# extension built with it installs only when vsql_allow_preview_extensions is ON.
+# Those capabilities change in place, and only the dev ABI headers carry their
+# current form, so the R-tree build compiles against the dev ABI.
+option(VSQL_CUBE_RTREE "Build the cube R-tree index (preview)" OFF)
+if(VSQL_CUBE_RTREE)
+  set(VSQL_USE_DEV_ABI ON)
+endif()
+
 # Find VillageSQL SDK (for VEB creation macro and build infrastructure)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 find_package(VillageSQL REQUIRED)
@@ -36,14 +45,21 @@ find_package(VillageSQL REQUIRED)
 message(STATUS "VillageSQL SDK found at: ${VillageSQL_PREFIX}")
 message(STATUS "VillageSQL include dir: ${VillageSQL_INCLUDE_DIR}")
 
+set(VSQL_CUBE_SOURCES src/vsql_cube.cc)
+if(VSQL_CUBE_RTREE)
+  list(APPEND VSQL_CUBE_SOURCES src/cube_rtree.cc)
+endif()
+
 # Create the vsql_cube shared library
-add_library(vsql_cube SHARED
-    src/vsql_cube.cc
-)
+add_library(vsql_cube SHARED ${VSQL_CUBE_SOURCES})
 
 target_include_directories(vsql_cube PRIVATE
     ${VillageSQLExtensionFramework_INCLUDE_DIR}
 )
+
+if(VSQL_CUBE_RTREE)
+  target_compile_definitions(vsql_cube PRIVATE VSQL_CUBE_RTREE)
+endif()
 
 # Create the VEB package
 VEF_CREATE_VEB(

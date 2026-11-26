@@ -30,6 +30,13 @@
 
 #include <villagesql/vsql.h>
 
+#ifdef VSQL_CUBE_RTREE
+#include <villagesql/preview/index_builder.h>
+#include <villagesql/preview/storage_builder.h>
+
+#include "cube_rtree.h"
+#endif
+
 #include <algorithm>
 #include <cassert>
 #include <cerrno>
@@ -595,6 +602,18 @@ static void set_cube_result_typed(const CubeData &c,
              static_cast<int>(c.ndim), n_slots);
     out.error(msg);
     return;
+  }
+  // Input parsing rejects NaN and infinity; arithmetic such as cube_enlarge
+  // can still overflow to them, so results are checked here as well.
+  const bool is_point = (c.flags & kFlagIsPoint) != 0;
+  for (int i = 0; i < c.ndim; i++) {
+    if (!std::isfinite(c.ll[i]) || (!is_point && !std::isfinite(c.ur[i]))) {
+      char msg[VEF_MAX_ERROR_LEN];
+      snprintf(msg, sizeof(msg),
+               "cube: coordinate %d of the result is not finite", i + 1);
+      out.error(msg);
+      return;
+    }
   }
   size_t buf_size = 8 + 2 * static_cast<size_t>(n_slots) * sizeof(double);
   auto buf = out.buffer();
@@ -1711,10 +1730,123 @@ constexpr auto CUBE =
         .intrinsic_default_str("(0)")
         .build();
 
+// The distance functions are named so the R-tree index profiles can bind them.
+static constexpr auto CUBE_DISTANCE_FN =
+    make_func<&cube_distance_impl>("cube_distance")
+        .returns(REAL)
+        .param(CUBE)
+        .param(CUBE)
+        .deterministic()
+        .build();
+
+static constexpr auto CUBE_TAXICAB_DISTANCE_FN =
+    make_func<&cube_taxicab_distance_impl>("cube_taxicab_distance")
+        .returns(REAL)
+        .param(CUBE)
+        .param(CUBE)
+        .deterministic()
+        .build();
+
+static constexpr auto CUBE_CHEBYSHEV_DISTANCE_FN =
+    make_func<&cube_chebyshev_distance_impl>("cube_chebyshev_distance")
+        .returns(REAL)
+        .param(CUBE)
+        .param(CUBE)
+        .deterministic()
+        .build();
+
+#ifdef VSQL_CUBE_RTREE
+namespace cube_rtree_registration {
+
+using vsql::preview_index_builder::FunctionKind;
+using vsql::preview_index_builder::Index;
+using vsql::preview_index_builder::IndexProfileCapability;
+using vsql::preview_index_builder::IndexTypeCapability;
+using vsql::preview_index_builder::make_index_profile;
+using vsql::preview_index_builder::make_index_type;
+using vsql::preview_storage_builder::StorageCapability;
+
+static constexpr const char kRtreeName[] = "rtree";
+
+// Exact nearest-neighbour index; see cube_rtree.h.
+// clang-format off
+static constexpr auto RTREE_INDEX =
+    make_index_type<kRtreeName, cube_rtree::RtreeIndex>()
+        .lifecycle()
+            .create<&cube_rtree::create>()
+            .load<&cube_rtree::load>()
+            .drop<&cube_rtree::drop>()
+        .dml()
+            .insert<&cube_rtree::insert>()
+            .mark_delete<&cube_rtree::mark_delete>()
+            .purge<&cube_rtree::purge>()
+        .scan()
+            .begin<&cube_rtree::begin>()
+            .position<&cube_rtree::position>()
+            .fetch<&cube_rtree::fetch>()
+            .validate<&cube_rtree::validate>()
+            .save<&cube_rtree::save>()
+            .restore<&cube_rtree::restore>()
+            .end<&cube_rtree::end>()
+        .global()
+            .capabilities(Index::Support::KNN)
+            .storage_props(Index::Storage::HAS_ROW_REF)
+        .build();
+// clang-format on
+
+// One profile per metric: a scan learns its metric from the profile function
+// id, and the server passes the id of the profile's ORDER function. The L2
+// profile is the default; the others are named per key part, e.g.
+// CREATE INDEX i ON t (c cube_rtree_l1) USING EXTENDED(vsql_cube.rtree).
+static const auto RTREE_L2_PROFILE =
+    make_index_profile("cube_rtree_l2")
+        .for_type(kCubeName)
+        .using_index(kRtreeName)
+        .with_function<CUBE_DISTANCE_FN>(cube_rtree::kFnL2, FunctionKind::Order)
+        .ordering(Index::Ordering::ASC)
+        .default_for_type(true)
+        .build();
+
+static const auto RTREE_L1_PROFILE =
+    make_index_profile("cube_rtree_l1")
+        .for_type(kCubeName)
+        .using_index(kRtreeName)
+        .with_function<CUBE_TAXICAB_DISTANCE_FN>(cube_rtree::kFnL1,
+                                                 FunctionKind::Order)
+        .ordering(Index::Ordering::ASC)
+        .build();
+
+static const auto RTREE_LINF_PROFILE =
+    make_index_profile("cube_rtree_linf")
+        .for_type(kCubeName)
+        .using_index(kRtreeName)
+        .with_function<CUBE_CHEBYSHEV_DISTANCE_FN>(cube_rtree::kFnLinf,
+                                                   FunctionKind::Order)
+        .ordering(Index::Ordering::ASC)
+        .build();
+
+static auto STORAGE = StorageCapability{};
+static auto INDEX_TYPE = IndexTypeCapability().index_type(RTREE_INDEX);
+static auto INDEX_PROFILE = IndexProfileCapability()
+                                .index_profile(RTREE_L2_PROFILE)
+                                .index_profile(RTREE_L1_PROFILE)
+                                .index_profile(RTREE_LINF_PROFILE);
+
+}  // namespace cube_rtree_registration
+
+#define CUBE_RTREE_CAPABILITIES                          \
+  .with(cube_rtree_registration::STORAGE)                \
+      .with(cube_rtree_registration::INDEX_TYPE)         \
+      .with(cube_rtree_registration::INDEX_PROFILE)
+#else
+#define CUBE_RTREE_CAPABILITIES
+#endif
+
 using namespace ::vsql;
 
 VEF_GENERATE_ENTRY_POINTS(
   make_extension()
+    CUBE_RTREE_CAPABILITIES
 
     // Custom type
     .type(CUBE)
@@ -1823,24 +1955,9 @@ VEF_GENERATE_ENTRY_POINTS(
       .build())
 
     // Distance
-    .func(make_func<&cube_distance_impl>("cube_distance")
-      .returns(REAL)
-      .param(CUBE)
-      .param(CUBE)
-      .deterministic()
-      .build())
-    .func(make_func<&cube_taxicab_distance_impl>("cube_taxicab_distance")
-      .returns(REAL)
-      .param(CUBE)
-      .param(CUBE)
-      .deterministic()
-      .build())
-    .func(make_func<&cube_chebyshev_distance_impl>("cube_chebyshev_distance")
-      .returns(REAL)
-      .param(CUBE)
-      .param(CUBE)
-      .deterministic()
-      .build())
+    .func(CUBE_DISTANCE_FN)
+    .func(CUBE_TAXICAB_DISTANCE_FN)
+    .func(CUBE_CHEBYSHEV_DISTANCE_FN)
 
     // Geometry
     .func(make_func<&cube_union_impl>("cube_union")

@@ -1,0 +1,351 @@
+# R-tree index on cube columns: exact nearest-neighbour scans for
+# cube_distance, cube_taxicab_distance and cube_chebyshev_distance.
+#
+# Needs vsql_cube built with -DVSQL_CUBE_RTREE=ON; skipped otherwise.
+#
+# Every index is created on an empty table: the server cannot yet build a
+# custom index over existing rows (see cube_rtree_build.test).
+
+--let $veb_dest = `SELECT CONCAT(@@veb_dir, '/vsql_cube.veb')`
+if ($VSQL_CUBE_VEB) {
+  --error 0,1
+  --remove_file $veb_dest
+  --copy_file $VSQL_CUBE_VEB $veb_dest
+}
+
+# Only a build with the R-tree uses preview capabilities, so only such a build
+# fails to install while preview extensions are off (error 3219).
+--disable_query_log
+# The probe's failed INSTALL is logged as an error.
+call mtr.add_suppression("Failed to load VEF extension 'vsql_cube': extension requires preview capabilities");
+--error 0,3219
+INSTALL EXTENSION vsql_cube;
+if (!$mysql_errno) {
+  UNINSTALL EXTENSION vsql_cube;
+  --skip Needs vsql_cube built with -DVSQL_CUBE_RTREE=ON
+}
+--enable_query_log
+
+SET PERSIST vsql_allow_preview_extensions = ON;
+INSTALL EXTENSION vsql_cube;
+
+--echo #
+--echo # Small table: points and boxes with known nearest neighbours
+--echo #
+
+CREATE TABLE t (
+  id INT PRIMARY KEY,
+  c `cube`(2) NOT NULL
+);
+CREATE INDEX idx_c ON t (c) USING EXTENDED(vsql_cube.rtree);
+
+--echo # Empty index
+SELECT id FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 3;
+
+INSERT INTO t VALUES
+  (1, '(0,0)'),
+  (2, '(3,4)'),
+  (3, '(1,1),(2,2)'),
+  (4, '(10,0)'),
+  (5, '(-6,-8)'),
+  (6, '(0,7),(1,9)');
+
+--echo # The KNN scan serves the query
+--replace_regex /\(cost=[0-9.e+-]+ rows=[0-9.e+-]+\)/(cost=COST rows=ROWS)/
+EXPLAIN FORMAT=TREE
+SELECT id FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 3;
+
+--echo # Expected: 1 (0), 3 (1.414214), 2 (5), 6 (7)
+SELECT id, ROUND(cube_distance(c, '(0,0)'), 6) AS d
+FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 4;
+
+--echo # A query point inside a box is at distance 0 from it.
+--echo # Expected: 3 (0), then 1 (2.12132)
+SELECT id, ROUND(cube_distance(c, '(1.5,1.5)'), 6) AS d
+FROM t ORDER BY cube_distance(c, '(1.5,1.5)') LIMIT 2;
+
+--echo # A query with fewer dimensions than the column: the query's missing
+--echo # dimension is 0. Expected: 3 (3.162278), 2 (4.472136)
+SELECT id, ROUND(cube_distance(c, '(5)'), 6) AS d
+FROM t ORDER BY cube_distance(c, '(5)') LIMIT 2;
+
+--echo # A box query. Expected: 3 (0), 2 (1), 1 (2.828427)
+SELECT id, ROUND(cube_distance(c, '(2,2),(3,3)'), 6) AS d
+FROM t ORDER BY cube_distance(c, '(2,2),(3,3)') LIMIT 3;
+
+--echo # The default profile does not serve the other metrics
+--replace_regex /\(cost=[0-9.e+-]+ rows=[0-9.e+-]+\)/(cost=COST rows=ROWS)/
+EXPLAIN FORMAT=TREE
+SELECT id FROM t ORDER BY cube_taxicab_distance(c, '(0,0)') LIMIT 3;
+
+--echo #
+--echo # Taxicab and Chebyshev profiles
+--echo #
+
+CREATE TABLE tm (
+  id INT PRIMARY KEY,
+  c `cube`(2) NOT NULL
+);
+CREATE INDEX idx_l1 ON tm (c cube_rtree_l1) USING EXTENDED(vsql_cube.rtree);
+CREATE INDEX idx_linf ON tm (c cube_rtree_linf) USING EXTENDED(vsql_cube.rtree);
+INSERT INTO tm SELECT * FROM t;
+
+--replace_regex /\(cost=[0-9.e+-]+ rows=[0-9.e+-]+\)/(cost=COST rows=ROWS)/
+EXPLAIN FORMAT=TREE
+SELECT id FROM tm ORDER BY cube_taxicab_distance(c, '(0,0)') LIMIT 3;
+--echo # Expected: 1 (0.1), 3 (1.9), 2 (6.9)
+SELECT id, ROUND(cube_taxicab_distance(c, '(0.1,0)'), 6) AS d
+FROM tm ORDER BY cube_taxicab_distance(c, '(0.1,0)') LIMIT 3;
+
+--replace_regex /\(cost=[0-9.e+-]+ rows=[0-9.e+-]+\)/(cost=COST rows=ROWS)/
+EXPLAIN FORMAT=TREE
+SELECT id FROM tm ORDER BY cube_chebyshev_distance(c, '(0,0)') LIMIT 3;
+--echo # Expected: 1 (0), 3 (1), 2 (4)
+SELECT id, ROUND(cube_chebyshev_distance(c, '(0,0)'), 6) AS d
+FROM tm ORDER BY cube_chebyshev_distance(c, '(0,0)') LIMIT 3;
+
+DROP TABLE tm;
+
+--echo #
+--echo # DML
+--echo #
+
+--echo # UPDATE moves a row; it must be found at its new place only.
+UPDATE t SET c = '(0.5,0)' WHERE id = 4;
+--echo # Expected: 1 (0), 4 (0.5), 3 (1.414214)
+SELECT id, ROUND(cube_distance(c, '(0,0)'), 6) AS d
+FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 3;
+
+DELETE FROM t WHERE id = 1;
+--echo # Expected: 4 (0.5), 3 (1.414214), 2 (5)
+SELECT id, ROUND(cube_distance(c, '(0,0)'), 6) AS d
+FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 3;
+
+--echo # Rolled-back INSERT, UPDATE and DELETE leave the index as it was.
+BEGIN;
+INSERT INTO t VALUES (7, '(0.1,0.1)');
+UPDATE t SET c = '(50,50)' WHERE id = 4;
+DELETE FROM t WHERE id = 3;
+--echo # Inside the transaction. Expected: 7 (0.141421), 2 (5)
+SELECT id, ROUND(cube_distance(c, '(0,0)'), 6) AS d
+FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 2;
+ROLLBACK;
+--echo # Expected: 4 (0.5), 3 (1.414214), 2 (5)
+SELECT id, ROUND(cube_distance(c, '(0,0)'), 6) AS d
+FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 3;
+
+--echo # Delete and re-insert a row with the same value in one transaction.
+--echo # The row has a delete-marked and a live entry; both outcomes must
+--echo # leave exactly one visible entry.
+BEGIN;
+DELETE FROM t WHERE id = 3;
+INSERT INTO t VALUES (3, '(1,1),(2,2)');
+ROLLBACK;
+--echo # Expected: 4, 3, 2
+SELECT id FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 3;
+BEGIN;
+DELETE FROM t WHERE id = 3;
+INSERT INTO t VALUES (3, '(1,1),(2,2)');
+COMMIT;
+--echo # Expected: 4, 3, 2
+SELECT id FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 3;
+
+--echo # Change a row away and back in one transaction.
+BEGIN;
+UPDATE t SET c = '(40,40)' WHERE id = 2;
+UPDATE t SET c = '(3,4)' WHERE id = 2;
+UPDATE t SET c = '(40,40)' WHERE id = 2;
+UPDATE t SET c = '(3,4)' WHERE id = 2;
+COMMIT;
+--echo # Expected: 4, 3, 2
+SELECT id FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 3;
+
+--echo #
+--echo # Locking read
+--echo #
+
+BEGIN;
+--echo # Expected: 4, 3
+SELECT id FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 2 FOR UPDATE;
+COMMIT;
+
+--echo #
+--echo # A locking read waits for a transaction that moved a row away and back
+--echo # several times. Several index entries for that row then look current
+--echo # to validate(); the row must still be returned once.
+--echo #
+
+CREATE TABLE tl (id INT PRIMARY KEY, c `cube`(2) NOT NULL);
+CREATE INDEX idx_c ON tl (c) USING EXTENDED(vsql_cube.rtree);
+INSERT INTO tl VALUES (1, '(1,1)'), (2, '(2,2)'), (3, '(3,3)');
+
+--connect (con_mover, localhost, root,,)
+BEGIN;
+UPDATE tl SET c = '(5,5)' WHERE id = 1;
+UPDATE tl SET c = '(1,1)' WHERE id = 1;
+UPDATE tl SET c = '(5,5)' WHERE id = 1;
+
+--connection default
+BEGIN;
+--send SELECT id FROM tl ORDER BY cube_distance(c, '(0,0)') LIMIT 10 FOR SHARE
+
+--connection con_mover
+let $wait_condition =
+  SELECT COUNT(*) = 1 FROM information_schema.innodb_trx
+  WHERE trx_state = 'LOCK WAIT';
+--source include/wait_condition.inc
+COMMIT;
+
+--connection default
+--echo # Expected: 2, 3, 1, each once
+--reap
+COMMIT;
+--disconnect con_mover
+DROP TABLE tl;
+
+--echo #
+--echo # MVCC: a snapshot keeps seeing the rows as they were
+--echo #
+
+--connect (con1, localhost, root,,)
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+
+--connection default
+UPDATE t SET c = '(90,90)' WHERE id = 4;
+INSERT INTO t VALUES (8, '(0.2,0)');
+DELETE FROM t WHERE id = 3;
+
+--connection con1
+--echo # Snapshot. Expected: 4 (0.5), 3 (1.414214), 2 (5)
+SELECT id, ROUND(cube_distance(c, '(0,0)'), 6) AS d
+FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 3;
+COMMIT;
+--echo # After the snapshot. Expected: 8 (0.2), 2 (5), 6 (7)
+SELECT id, ROUND(cube_distance(c, '(0,0)'), 6) AS d
+FROM t ORDER BY cube_distance(c, '(0,0)') LIMIT 3;
+
+--disconnect con1
+--source include/wait_until_disconnected.inc
+--connection default
+
+DROP TABLE t;
+
+--echo #
+--echo # NULL values are not indexed
+--echo #
+
+CREATE TABLE tn (id INT PRIMARY KEY, c `cube`(2));
+CREATE INDEX idx_c ON tn (c) USING EXTENDED(vsql_cube.rtree);
+INSERT INTO tn VALUES (1, '(1,1)'), (2, NULL), (3, '(2,2)');
+UPDATE tn SET c = NULL WHERE id = 3;
+UPDATE tn SET c = '(0,0)' WHERE id = 2;
+--echo # Expected: 2, 1
+SELECT id FROM tn ORDER BY cube_distance(c, '(0,0)') LIMIT 5;
+DROP TABLE tn;
+
+--echo #
+--echo # Rollback with several entries for one row marked by the same
+--echo # transaction: undo must unmark the entry each step marked, so the row
+--echo # keeps exactly one live entry.
+--echo #
+
+CREATE TABLE tr (id INT PRIMARY KEY, c `cube`(2) NOT NULL);
+CREATE INDEX idx_c ON tr (c) USING EXTENDED(vsql_cube.rtree);
+INSERT INTO tr VALUES (1,'(1,1)'), (2,'(2,2)'), (3,'(3,3)'), (4,'(4,4)'),
+                      (5,'(5,5)');
+
+--echo # Move a row away, back and away again, then roll back.
+BEGIN;
+UPDATE tr SET c = '(90,90)' WHERE id = 3;
+UPDATE tr SET c = '(3,3)' WHERE id = 3;
+UPDATE tr SET c = '(90,90)' WHERE id = 3;
+ROLLBACK;
+--echo # Expected: 1, 2, 3, 4, 5, each once
+SELECT id FROM tr ORDER BY cube_distance(c, '(0,0)') LIMIT 100;
+
+--echo # Delete a row, insert it again and move it, then roll back.
+BEGIN;
+DELETE FROM tr WHERE id = 4;
+INSERT INTO tr VALUES (4, '(4,4)');
+UPDATE tr SET c = '(90,90)' WHERE id = 4;
+ROLLBACK;
+--echo # Expected: 1, 2, 3, 4, 5, each once
+SELECT id FROM tr ORDER BY cube_distance(c, '(0,0)') LIMIT 100;
+
+--echo # Deleted rows must not come back through a leftover entry.
+DELETE FROM tr WHERE id IN (3, 4);
+--echo # Expected: 1 (1, 1), 2 (2, 2), 5 (5, 5)
+SELECT id, cube_to_string(c) AS c FROM tr
+ORDER BY cube_distance(c, '(0,0)') LIMIT 100;
+DROP TABLE tr;
+
+--echo #
+--echo # Large table: many tree levels. The index scan must return the same
+--echo # rows as a full scan.
+--echo #
+
+--echo # cube(100) entries are wide, so pages hold few of them and the tree
+--echo # gets several levels.
+CREATE TABLE big (
+  id INT PRIMARY KEY,
+  c `cube`(100) NOT NULL
+);
+CREATE INDEX idx_c ON big (c) USING EXTENDED(vsql_cube.rtree);
+# The cube type converts only literals implicitly, so each value is computed
+# first and inserted as a literal.
+--disable_query_log
+--let $i = 1
+while ($i <= 2000) {
+  --let $v = `SELECT CONCAT('(', MOD($i * 7919, 1009) + $i / 10000, ',', MOD($i * 104729, 1013) + $i / 30000, ')')`
+  --eval INSERT INTO big VALUES ($i, '$v')
+  --inc $i
+}
+--enable_query_log
+SELECT COUNT(*) FROM big;
+
+--replace_regex /\(cost=[0-9.e+-]+ rows=[0-9.e+-]+\)/(cost=COST rows=ROWS)/
+EXPLAIN FORMAT=TREE
+SELECT id FROM big ORDER BY cube_distance(c, '(500,500)') LIMIT 10;
+
+--let $q = (500,500)
+--eval SELECT COUNT(*) = 10 AS same FROM (SELECT id FROM big ORDER BY cube_distance(c, '$q') LIMIT 10) a JOIN (SELECT id FROM big IGNORE INDEX (idx_c) ORDER BY cube_distance(c, '$q') LIMIT 10) b USING (id)
+
+--echo # More rows than the first batch, and a WHERE filter that makes the
+--echo # limit inexact, so the scan fetches further batches.
+--echo # Expected: 1 (both counts 300)
+SELECT COUNT(*) = 300 AS same FROM
+  (SELECT id FROM big ORDER BY cube_distance(c, '(10,990)') LIMIT 300) a
+  JOIN
+  (SELECT id FROM big IGNORE INDEX (idx_c)
+   ORDER BY cube_distance(c, '(10,990)') LIMIT 300) b USING (id);
+SELECT COUNT(*) = 20 AS same FROM
+  (SELECT id FROM big WHERE MOD(id, 7) = 0
+   ORDER BY cube_distance(c, '(700,100)') LIMIT 20) a
+  JOIN
+  (SELECT id FROM big IGNORE INDEX (idx_c) WHERE MOD(id, 7) = 0
+   ORDER BY cube_distance(c, '(700,100)') LIMIT 20) b USING (id);
+
+--echo # Rows in distance order from the index scan. Expected: d is
+--echo # non-decreasing.
+SELECT id, ROUND(cube_distance(c, '(250,750)'), 4) AS d
+FROM big ORDER BY cube_distance(c, '(250,750)') LIMIT 8;
+
+--echo # After deleting half the rows and moving some of the rest.
+DELETE FROM big WHERE MOD(id, 2) = 0;
+--disable_query_log
+--let $i = 5
+while ($i <= 2000) {
+  --let $v = `SELECT CONCAT('(', MOD($i * 31, 1000) + $i / 10000, ',', MOD($i * 17, 1000) + $i / 30000, ')')`
+  --eval UPDATE big SET c = '$v' WHERE id = $i
+  --let $i = `SELECT $i + 10`
+}
+--enable_query_log
+SELECT COUNT(*) FROM big;
+--let $q = (500,500)
+--eval SELECT COUNT(*) = 10 AS same FROM (SELECT id FROM big ORDER BY cube_distance(c, '$q') LIMIT 10) a JOIN (SELECT id FROM big IGNORE INDEX (idx_c) ORDER BY cube_distance(c, '$q') LIMIT 10) b USING (id)
+
+DROP TABLE big;
+
+UNINSTALL EXTENSION vsql_cube;
+SET PERSIST vsql_allow_preview_extensions = OFF;
+RESET PERSIST vsql_allow_preview_extensions;

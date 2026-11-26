@@ -556,6 +556,32 @@ cube_scalar_agg(x)
 (1),(5)
 DROP TABLE t_scalar_agg_guard;
 #
+# Non-finite coordinates
+#
+CREATE TABLE _tinf (id INT PRIMARY KEY, c `cube`(1) NOT NULL);
+INSERT INTO _tinf VALUES (0, '(inf)');
+ERROR HY000: Incorrect cube value: '(inf)' for column 'c' at row 1
+INSERT INTO _tinf VALUES (0, '(nan)');
+ERROR HY000: Incorrect cube value: '(nan)' for column 'c' at row 1
+INSERT INTO _tinf VALUES (1, '(1.7e308)'), (2, '(1e308)');
+SELECT cube_enlarge(c, 1.7e308, 1) FROM _tinf WHERE id = 1;
+ERROR HY000: VDF error in function 'cube_enlarge': cube: coordinate 1 of the result is not finite
+SELECT cube_enlarge(c, -1e308, 1) FROM _tinf WHERE id = 1;
+ERROR HY000: VDF error in function 'cube_enlarge': cube: coordinate 1 of the result is not finite
+SELECT cube_to_string(cube_enlarge(c, 7e307, 1)) FROM _tinf WHERE id = 2;
+cube_to_string(cube_enlarge(c, 7e307, 1))
+(3e+307),(1.7e+308)
+UPDATE _tinf SET c = cube_enlarge(c, 1.7e308, 1) WHERE id = 1;
+ERROR HY000: VDF error in function 'cube_enlarge': cube: coordinate 1 of the result is not finite
+CREATE TABLE _tinf2 AS SELECT cube_enlarge(c, 1.7e308, 1) AS c FROM _tinf
+WHERE id = 1;
+ERROR HY000: VDF error in function 'cube_enlarge': cube: coordinate 1 of the result is not finite
+SELECT id, cube_to_string(c) FROM _tinf ORDER BY id;
+id	cube_to_string(c)
+1	(1.7e+308)
+2	(1e+308)
+DROP TABLE _tinf;
+#
 # Cleanup
 #
 DROP TABLE _ta, _tab;
